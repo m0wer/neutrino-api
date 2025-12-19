@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2025-12-19
+
 ### Added
 - Main entry point (`cmd/neutrinod/main.go`) for building the standalone binary
 - Mainnet end-to-end tests (`e2e/mainnet_test.go`) that:
@@ -89,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RESTful JSON API
 - Configurable via CLI flags or environment variables
 
-[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/yourusername/neutrino-api/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yourusername/neutrino-api/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yourusername/neutrino-api/releases/tag/v0.1.0
