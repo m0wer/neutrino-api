@@ -21,3 +21,7 @@
 - **Interfaces**: Define interfaces in consumer packages, not producer packages
 - **Context**: Pass `context.Context` as first parameter to functions that need it
 - **JSON**: Use struct tags with snake_case for JSON fields (e.g., `json:"block_height"`)
+
+# General Guidelines
+
+- After making changes, run all tests to ensure nothing is broken. Then run prek to format and lint the code. Finally, update CHANGELOG.md with a summary of your changes.
