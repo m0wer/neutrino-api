@@ -11,7 +11,15 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Run required checks before creating release
+  pre-commit:
+    uses: ./.github/workflows/pre-commit.yaml
+
+  tests:
+    uses: ./.github/workflows/test.yaml
+
   create-release:
+    needs: [pre-commit, tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
