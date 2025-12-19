@@ -1,0 +1,44 @@
+# Binaries
+neutrinod
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data directories
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Docker
+.dockerignore
+
+# Shared directory (for docker-compose)
+/shared/*
+!/shared/.gitkeep

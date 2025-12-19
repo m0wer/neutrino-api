@@ -1,0 +1,142 @@
+name: tests
+
+on:
+  push:
+    paths:
+      - 'neutrino_server/**'
+      - 'docker-compose.yml'
+      - '.github/workflows/test.yaml'
+  pull_request:
+    paths:
+      - 'neutrino_server/**'
+      - 'docker-compose.yml'
+      - '.github/workflows/test.yaml'
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  test-neutrino:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: neutrino_server/go.sum
+
+      - name: Install dependencies
+        working-directory: neutrino_server
+        run: go mod download
+
+      - name: Run go vet
+        working-directory: neutrino_server
+        run: go vet ./...
+
+      - name: Run staticcheck
+        working-directory: neutrino_server
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+      - name: Run tests
+        working-directory: neutrino_server
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./neutrino_server/coverage.out
+          flags: unittests
+        if: always()
+
+  test-docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t neutrino-api:test ./neutrino_server
+
+      - name: Test Docker image runs
+        run: |
+          docker run -d --name neutrino-test -p 8334:8334 \
+            -e NETWORK=regtest \
+            -e LOG_LEVEL=debug \
+            neutrino-api:test
+          sleep 5
+          docker logs neutrino-test
+          docker stop neutrino-test
+
+  test-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start services
+        run: docker compose up -d --build
+
+      - name: Wait for Bitcoin
+        run: |
+          echo "Waiting for Bitcoin..."
+          for i in {1..60}; do
+            if docker compose exec -T bitcoin bitcoin-cli -chain=regtest \
+                -rpcport=18443 -rpcuser=test -rpcpassword=test getblockchaininfo 2>/dev/null; then
+              echo "Bitcoin ready"
+              break
+            fi
+            echo "Attempt $i/60..."
+            sleep 2
+          done
+
+      - name: Wait for Neutrino
+        run: |
+          echo "Waiting for Neutrino..."
+          for i in {1..60}; do
+            if curl -s http://localhost:8334/v1/status 2>/dev/null | grep -q "synced"; then
+              echo "Neutrino ready"
+              break
+            fi
+            echo "Attempt $i/60..."
+            sleep 2
+          done
+
+      - name: Test API endpoints
+        run: |
+          # Test status endpoint
+          echo "Testing /v1/status..."
+          STATUS=$(curl -s http://localhost:8334/v1/status)
+          echo "Status response: $STATUS"
+
+          # Verify response has expected fields
+          echo "$STATUS" | jq -e '.synced != null' || exit 1
+          echo "$STATUS" | jq -e '.block_height != null' || exit 1
+          echo "$STATUS" | jq -e '.filter_height != null' || exit 1
+          echo "$STATUS" | jq -e '.peers != null' || exit 1
+
+          # Test peers endpoint
+          echo "Testing /v1/peers..."
+          PEERS=$(curl -s http://localhost:8334/v1/peers)
+          echo "Peers response: $PEERS"
+          echo "$PEERS" | jq -e '.count != null' || exit 1
+
+          # Test fee estimation endpoint
+          echo "Testing /v1/fees/estimate..."
+          FEES=$(curl -s "http://localhost:8334/v1/fees/estimate?target_blocks=6")
+          echo "Fees response: $FEES"
+          echo "$FEES" | jq -e '.fee_rate != null' || exit 1
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Neutrino logs ==="
+          docker compose logs neutrino
+          echo ""
+          echo "=== Bitcoin logs ==="
+          docker compose logs bitcoin
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v

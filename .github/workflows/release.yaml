@@ -1,0 +1,212 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=$(git describe --tags --always)
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
+      - name: Extract release notes
+        id: extract_notes
+        run: |
+          # Extract version-specific notes from CHANGELOG.md if it exists
+          if [ -f CHANGELOG.md ]; then
+            VERSION=${{ steps.get_version.outputs.version }}
+            # Simple extraction - customize as needed
+            echo "notes<<EOF" >> $GITHUB_OUTPUT
+            echo "Release ${VERSION}" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "Built with Neutrino v0.16.0" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "notes=Release ${{ steps.get_version.outputs.version }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ steps.get_version.outputs.version }}
+          body: ${{ steps.extract_notes.outputs.notes }}
+          draft: false
+          prerelease: false
+
+  build-binaries:
+    needs: create-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            output: neutrinod-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output: neutrinod-linux-arm64
+          - goos: darwin
+            goarch: amd64
+            output: neutrinod-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            output: neutrinod-darwin-arm64
+          - goos: windows
+            goarch: amd64
+            output: neutrinod-windows-amd64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: neutrino_server/go.sum
+
+      - name: Get dependencies
+        working-directory: neutrino_server
+        run: go mod download
+
+      - name: Build binary
+        working-directory: neutrino_server
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          VERSION=${{ needs.create-release.outputs.version }}
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+
+          go build \
+            -ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.commit=${COMMIT_HASH}" \
+            -o ${{ matrix.output }} \
+            ./cmd/neutrinod
+
+      - name: Create archive
+        run: |
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            zip neutrino_server/${{ matrix.output }}.zip neutrino_server/${{ matrix.output }}
+            ASSET_PATH=neutrino_server/${{ matrix.output }}.zip
+            ASSET_NAME=${{ matrix.output }}.zip
+          else
+            tar -czf neutrino_server/${{ matrix.output }}.tar.gz -C neutrino_server ${{ matrix.output }}
+            ASSET_PATH=neutrino_server/${{ matrix.output }}.tar.gz
+            ASSET_NAME=${{ matrix.output }}.tar.gz
+          fi
+          echo "ASSET_PATH=${ASSET_PATH}" >> $GITHUB_ENV
+          echo "ASSET_NAME=${ASSET_NAME}" >> $GITHUB_ENV
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ${{ env.ASSET_PATH }}
+          asset_name: ${{ env.ASSET_NAME }}
+          asset_content_type: application/octet-stream
+
+  build-docker:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./neutrino_server
+          file: ./neutrino_server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ needs.create-release.outputs.version }}
+            BUILD_TIME=${{ github.event.repository.updated_at }}
+            COMMIT=${{ github.sha }}
+
+  checksums:
+    needs: [create-release, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: ./artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} \; > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload checksums
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./artifacts/SHA256SUMS
+          asset_name: SHA256SUMS
+          asset_content_type: text/plain

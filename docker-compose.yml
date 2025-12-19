@@ -1,0 +1,69 @@
+services:
+  # Bitcoin Core regtest node (main node for our implementation)
+  # Uses latest Bitcoin Core with descriptor wallets and compact block filters
+  bitcoin:
+    image: kylemanna/bitcoind:latest
+    container_name: neutrino-bitcoin
+    restart: unless-stopped
+    healthcheck:
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      test: ["CMD-SHELL", "bitcoin-cli -chain=regtest -rpcport=18443 -rpcuser=test -rpcpassword=test getblockchaininfo"]
+    command:
+      - '-server=1'
+      - '-regtest=1'
+      - '-rpcuser=test'
+      - '-rpcpassword=test'
+      - '-rpcallowip=0.0.0.0/0'
+      - '-rpcbind=0.0.0.0'
+      - '-rpcport=18443'
+      - '-port=18444'
+      - '-txindex=1'
+      - '-fallbackfee=0.0002'
+      - '-zmqpubrawblock=tcp://0.0.0.0:28332'
+      - '-zmqpubrawtx=tcp://0.0.0.0:28333'
+      - '-debug=1'
+      - '-disablewallet=0'
+      # Compact block filters for Neutrino support (BIP157/158)
+      - '-blockfilterindex=1'
+      - '-peerblockfilters=1'
+    ports:
+      - "18453:18443"
+      - "18454:18444"
+    volumes:
+      - bitcoin-data:/home/bitcoin/.bitcoin
+      - ./shared:/shared
+    networks:
+      - bitcoin-network
+
+  neutrino:
+    build:
+      context: ./neutrino_server
+      dockerfile: Dockerfile
+    container_name: neutrino-api
+    restart: unless-stopped
+    environment:
+      - NETWORK=regtest
+      - LISTEN_ADDR=0.0.0.0:8334
+      - DATA_DIR=/data/neutrino
+      - LOG_LEVEL=debug
+      - CONNECT_PEERS=bitcoin:18444
+      - MAX_PEERS=8
+    ports:
+      - "8334:8334"
+    volumes:
+      - neutrino-data:/data/neutrino
+    networks:
+      - bitcoin-network
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+
+volumes:
+  neutrino-data:
+  bitcoin-data:
+
+networks:
+  bitcoin-network:
+    driver: bridge

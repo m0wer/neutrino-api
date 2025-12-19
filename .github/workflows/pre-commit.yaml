@@ -1,0 +1,36 @@
+name: pre-commit
+
+on:
+  push:
+    paths:
+      - '**.go'
+      - '**.yaml'
+      - '**.yml'
+      - '.pre-commit-config.yaml'
+      - '.github/workflows/pre-commit.yaml'
+  pull_request:
+    paths:
+      - '**.go'
+      - '**.yaml'
+      - '**.yml'
+      - '.pre-commit-config.yaml'
+      - '.github/workflows/pre-commit.yaml'
+  workflow_call:
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+        cache: false
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+
+    - uses: pre-commit/action@v3.0.1
