@@ -190,19 +190,30 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v3
-        with:
-          path: ./artifacts
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p artifacts
+          cd artifacts
+          gh release download ${{ needs.create-release.outputs.version }} \
+            --repo ${{ github.repository }} \
+            --pattern '*.tar.gz' \
+            --pattern '*.zip'
 
       - name: Generate checksums
         run: |
           cd artifacts
-          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} \; > SHA256SUMS
+          sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
       - name: Upload checksums
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload ${{ github.ref_name }} ./artifacts/SHA256SUMS --repo ${{ github.repository }}
+          gh release upload ${{ needs.create-release.outputs.version }} \
+            ./artifacts/SHA256SUMS \
+            --repo ${{ github.repository }}
