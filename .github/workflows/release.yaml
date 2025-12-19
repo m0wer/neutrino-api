@@ -112,26 +112,12 @@ jobs:
             -o ${{ matrix.output }} \
             ./cmd/neutrinod
 
-      - name: Create archive
-        run: |
-          if [[ "${{ matrix.goos }}" == "windows" ]]; then
-            zip neutrino_server/${{ matrix.output }}.zip neutrino_server/${{ matrix.output }}
-            ASSET_PATH=neutrino_server/${{ matrix.output }}.zip
-            ASSET_NAME=${{ matrix.output }}.zip
-          else
-            tar -czf neutrino_server/${{ matrix.output }}.tar.gz -C neutrino_server ${{ matrix.output }}
-            ASSET_PATH=neutrino_server/${{ matrix.output }}.tar.gz
-            ASSET_NAME=${{ matrix.output }}.tar.gz
-          fi
-          echo "ASSET_PATH=${ASSET_PATH}" >> $GITHUB_ENV
-          echo "ASSET_NAME=${ASSET_NAME}" >> $GITHUB_ENV
-
       - name: Upload Release Asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload ${{ needs.create-release.outputs.version }} \
-            "${{ env.ASSET_PATH }}"
+            "neutrino_server/${{ matrix.output }}"
 
   build-docker:
     needs: create-release
@@ -201,8 +187,7 @@ jobs:
           cd artifacts
           gh release download ${{ needs.create-release.outputs.version }} \
             --repo ${{ github.repository }} \
-            --pattern '*.tar.gz' \
-            --pattern '*.zip'
+            --pattern 'neutrinod-*'
 
       - name: Generate checksums
         run: |
