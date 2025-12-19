@@ -13,8 +13,9 @@ env:
 jobs:
   create-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
       version: ${{ steps.get_version.outputs.version }}
     steps:
       - name: Checkout
@@ -31,37 +32,37 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Version: ${VERSION}"
 
-      - name: Extract release notes
+      - name: Extract release notes from CHANGELOG
         id: extract_notes
         run: |
-          # Extract version-specific notes from CHANGELOG.md if it exists
+          VERSION=${{ steps.get_version.outputs.version }}
+          # Extract notes for this version from CHANGELOG.md
           if [ -f CHANGELOG.md ]; then
-            VERSION=${{ steps.get_version.outputs.version }}
-            # Simple extraction - customize as needed
-            echo "notes<<EOF" >> $GITHUB_OUTPUT
-            echo "Release ${VERSION}" >> $GITHUB_OUTPUT
-            echo "" >> $GITHUB_OUTPUT
-            echo "Built with Neutrino v0.16.0" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+            # Get content between version header and next version or end
+            NOTES=$(awk "/## \[${VERSION#v}\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md)
+            if [ -z "$NOTES" ]; then
+              NOTES="Release ${VERSION}"$'\n\n'"Built with Neutrino v0.16.0"$'\n\n'"See [CHANGELOG.md](CHANGELOG.md) for details."
+            fi
           else
-            echo "notes=Release ${{ steps.get_version.outputs.version }}" >> $GITHUB_OUTPUT
+            NOTES="Release ${VERSION}"
           fi
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ steps.get_version.outputs.version }}
-          body: ${{ steps.extract_notes.outputs.notes }}
-          draft: false
-          prerelease: false
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${{ steps.get_version.outputs.version }} \
+            --title "Release ${{ steps.get_version.outputs.version }}" \
+            --notes "${{ steps.extract_notes.outputs.notes }}"
 
   build-binaries:
     needs: create-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -126,14 +127,11 @@ jobs:
           echo "ASSET_NAME=${ASSET_NAME}" >> $GITHUB_ENV
 
       - name: Upload Release Asset
-        uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ${{ env.ASSET_PATH }}
-          asset_name: ${{ env.ASSET_NAME }}
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload ${{ needs.create-release.outputs.version }} \
+            "${{ env.ASSET_PATH }}"
 
   build-docker:
     needs: create-release
@@ -189,6 +187,8 @@ jobs:
   checksums:
     needs: [create-release, build-binaries]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v3
@@ -202,11 +202,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Upload checksums
-        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./artifacts/SHA256SUMS
-          asset_name: SHA256SUMS
-          asset_content_type: text/plain
+        run: |
+          gh release upload ${{ github.ref_name }} ./artifacts/SHA256SUMS --repo ${{ github.repository }}
