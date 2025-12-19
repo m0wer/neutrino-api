@@ -1,12 +1,11 @@
 /*
-Neutrino server main entry point.
-
-This server wraps the lightninglabs/neutrino BIP157/BIP158 light client
-with a REST API for use by JoinMarket maker/taker clients.
+neutrinod is a standalone REST API server for neutrino, a privacy-preserving
+Bitcoin light client using BIP157/BIP158 compact block filters.
 */
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -23,65 +22,49 @@ import (
 )
 
 var (
-	// Build-time variables (set via -ldflags)
-	version   = "dev"
-	buildTime = "unknown"
-	commit    = "unknown"
-
-	// Upstream neutrino version
-	neutrinoVersion = "v0.16.0"
-
-	// Command-line flags
-	network         = flag.String("network", "mainnet", "Bitcoin network (mainnet, testnet, regtest, signet)")
-	dataDir         = flag.String("datadir", "/data/neutrino", "Data directory for headers and filters")
-	listenAddr      = flag.String("listen", "0.0.0.0:8334", "REST API listen address")
-	torProxy        = flag.String("proxy", "", "Tor SOCKS5 proxy address (e.g., 127.0.0.1:9050)")
-	connectPeers    = flag.String("connect", "", "Comma-separated list of peers to connect to")
-	logLevel        = flag.String("loglevel", "info", "Log level (trace, debug, info, warn, error)")
-	maxPeers        = flag.Int("maxpeers", 8, "Maximum number of peers to connect to")
-	banDuration     = flag.Duration("banduration", 24*time.Hour, "Duration to ban misbehaving peers")
-	filterCacheSize = flag.Int("filtercache", 4096, "Size of filter cache (number of filters)")
-	showVersion     = flag.Bool("version", false, "Show version information and exit")
+	// Version is set at build time via ldflags
+	version = "dev"
 )
 
 func main() {
+	// Parse command line flags
+	network := flag.String("network", getEnv("NETWORK", "mainnet"), "Bitcoin network (mainnet, testnet, regtest, signet)")
+	listen := flag.String("listen", getEnv("LISTEN_ADDR", "0.0.0.0:8334"), "REST API listen address")
+	dataDir := flag.String("datadir", getEnv("DATA_DIR", "/data/neutrino"), "Data directory for headers and filters")
+	logLevel := flag.String("loglevel", getEnv("LOG_LEVEL", "info"), "Log level (trace, debug, info, warn, error)")
+	connectPeers := flag.String("connect", getEnv("CONNECT_PEERS", ""), "Comma-separated list of peers to connect to")
+	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
 
-	// Show version if requested
 	if *showVersion {
-		fmt.Printf("Neutrino API Server\n")
-		fmt.Printf("  Version:          %s\n", version)
-		fmt.Printf("  Neutrino:         %s\n", neutrinoVersion)
-		fmt.Printf("  Build time:       %s\n", buildTime)
-		fmt.Printf("  Commit:           %s\n", commit)
-		fmt.Printf("  Go version:       %s\n", "go1.21")
+		fmt.Printf("neutrinod %s\n", version)
 		os.Exit(0)
 	}
 
-	// Setup logging
+	// Set up logging
 	backend := btclog.NewBackend(os.Stdout)
 	logger := backend.Logger("MAIN")
 	level, _ := btclog.LevelFromString(*logLevel)
 	logger.SetLevel(level)
 
-	logger.Infof("Starting Neutrino API Server %s (neutrino %s)", version, neutrinoVersion)
-	logger.Infof("Listening on %s for %s network", *listenAddr, *network)
+	logger.Infof("Starting neutrinod %s", version)
+	logger.Infof("Network: %s", *network)
+	logger.Infof("Listen address: %s", *listen)
+	logger.Infof("Data directory: %s", *dataDir)
 
-	// Create data directory
+	// Ensure data directory exists
 	if err := os.MkdirAll(*dataDir, 0750); err != nil {
 		logger.Errorf("Failed to create data directory: %v", err)
 		os.Exit(1)
 	}
 
-	// Initialize neutrino node
+	// Create neutrino node
 	nodeConfig := &neutrino.Config{
 		Network:         *network,
 		DataDir:         *dataDir,
-		TorProxy:        *torProxy,
 		ConnectPeers:    *connectPeers,
-		MaxPeers:        *maxPeers,
-		BanDuration:     *banDuration,
-		FilterCacheSize: *filterCacheSize,
+		MaxPeers:        8,
+		FilterCacheSize: 5000,
 		Logger:          backend,
 		LogLevel:        *logLevel,
 	}
@@ -98,43 +81,58 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Setup REST API
+	// Create API handler
+	apiLogger := backend.Logger("API")
+	apiLogger.SetLevel(level)
+	handler := api.NewHandler(node, apiLogger)
+
+	// Set up router
 	router := mux.NewRouter()
-	apiHandler := api.NewHandler(node, logger)
-	apiHandler.RegisterRoutes(router)
+	handler.RegisterRoutes(router)
 
 	// Create HTTP server
 	server := &http.Server{
-		Addr:         *listenAddr,
+		Addr:         *listen,
 		Handler:      router,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start HTTP server in goroutine
+	// Start HTTP server in background
 	go func() {
-		logger.Infof("REST API listening on %s", *listenAddr)
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+		logger.Infof("HTTP server listening on %s", *listen)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Errorf("HTTP server error: %v", err)
 		}
 	}()
 
 	// Wait for shutdown signal
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
 	logger.Info("Shutting down...")
 
-	// Graceful shutdown
-	if err := server.Close(); err != nil {
-		logger.Warnf("HTTP server shutdown error: %v", err)
+	// Graceful shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		logger.Errorf("HTTP server shutdown error: %v", err)
 	}
 
 	if err := node.Stop(); err != nil {
-		logger.Warnf("Neutrino node shutdown error: %v", err)
+		logger.Errorf("Neutrino node shutdown error: %v", err)
 	}
 
 	logger.Info("Shutdown complete")
+}
+
+// getEnv returns the value of an environment variable or a default value.
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }

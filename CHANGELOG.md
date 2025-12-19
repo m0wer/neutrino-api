@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Main entry point (`cmd/neutrinod/main.go`) for building the standalone binary
+- Mainnet end-to-end tests (`e2e/mainnet_test.go`) that:
+  - Build and run the actual neutrinod binary against mainnet in isolation
+  - Use random available port to avoid conflicts with running instances
+  - Create temporary data directory for each test run
+  - Wait for blockchain sync to at least height 100,000
+  - Verify API endpoints with real blockchain data (genesis block, block 100000, etc.)
+  - Test address watching and UTXO queries with historical Bitcoin addresses
+  - Properly cleanup server process and temporary files after tests
+- GitHub workflow for automated mainnet e2e tests (`.github/workflows/e2e-mainnet.yaml`)
+  - Runs on pushes to any branch that modify neutrino_server files
+  - Can be triggered manually with configurable sync parameters
+
+### Changed
+- README updated with real Bitcoin addresses for examples:
+  - Satoshi's address from block 9: `12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S`
+  - Hal Finney's address (first BTC recipient): `1Q2TWHE3GMdB6BZKafqwxXtWAWgFt5Jvm3`
+- README now includes e2e test documentation with usage instructions
+- Documented the need for `-count=1` flag to disable Go test caching for fresh e2e runs
+
 ### Fixed
 - Removed unnecessary nil check in rescan_test.go flagged by staticcheck SA4031
 - Release workflow now requires pre-commit and test checks to pass before creating release

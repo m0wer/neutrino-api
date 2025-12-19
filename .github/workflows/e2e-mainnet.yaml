@@ -1,0 +1,64 @@
+name: e2e-mainnet
+
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - 'neutrino_server/**'
+      - '.github/workflows/e2e-mainnet.yaml'
+  pull_request:
+    paths:
+      - 'neutrino_server/**'
+      - '.github/workflows/e2e-mainnet.yaml'
+  workflow_dispatch:
+    inputs:
+      min_block_height:
+        description: 'Minimum block height to sync before running tests'
+        required: false
+        default: '100000'
+      sync_timeout:
+        description: 'Maximum sync timeout (e.g., 15m, 30m, 1h)'
+        required: false
+        default: '15m'
+
+# Only run one e2e test at a time
+concurrency:
+  group: e2e-mainnet
+  cancel-in-progress: false
+
+jobs:
+  e2e-mainnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: neutrino_server/go.sum
+
+      - name: Install dependencies
+        working-directory: neutrino_server
+        run: go mod download
+
+      - name: Run mainnet e2e tests
+        working-directory: neutrino_server
+        run: |
+          go test -tags=e2e -v -timeout 30m ./e2e/...
+        env:
+          # These can be used by the test if we add env var support
+          MIN_BLOCK_HEIGHT: ${{ github.event.inputs.min_block_height || '100000' }}
+          SYNC_TIMEOUT: ${{ github.event.inputs.sync_timeout || '15m' }}
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: |
+            neutrino_server/e2e/*.log
+          retention-days: 7

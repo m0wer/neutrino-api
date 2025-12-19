@@ -153,9 +153,10 @@ Response:
 Add an address to watch for transactions:
 
 ```bash
+# Watch Satoshi's known address from block 9
 curl -X POST http://localhost:8334/v1/watch/address \
   -H "Content-Type: application/json" \
-  -d '{"address": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"}'
+  -d '{"address": "12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"}'
 ```
 
 ### Get UTXOs
@@ -163,9 +164,11 @@ curl -X POST http://localhost:8334/v1/watch/address \
 Query UTXOs for a list of addresses:
 
 ```bash
+# Query UTXOs for historical Bitcoin addresses
+# (requires prior rescan to populate UTXO set)
 curl -X POST http://localhost:8334/v1/utxos \
   -H "Content-Type: application/json" \
-  -d '{"addresses": ["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"]}'
+  -d '{"addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S", "1Q2TWHE3GMdB6BZKafqwxXtWAWgFt5Jvm3"]}'
 ```
 
 Response:
@@ -173,12 +176,12 @@ Response:
 {
   "utxos": [
     {
-      "txid": "a7c4d8e2f5b9c3e6f8a1d4b7e9c2f5a8b3d6e9f2c5a8b1d4e7f9c2e5a8b3d6e9",
+      "txid": "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16",
       "vout": 0,
-      "value": 100000,
-      "address": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-      "scriptpubkey": "0014...",
-      "height": 820000
+      "value": 5000000000,
+      "address": "1Q2TWHE3GMdB6BZKafqwxXtWAWgFt5Jvm3",
+      "scriptpubkey": "76a914...",
+      "height": 170
     }
   ]
 }
@@ -189,11 +192,12 @@ Response:
 Trigger a blockchain rescan from a specific height:
 
 ```bash
+# Rescan from block 0 for Satoshi's address
 curl -X POST http://localhost:8334/v1/rescan \
   -H "Content-Type: application/json" \
   -d '{
-    "start_height": 800000,
-    "addresses": ["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"]
+    "start_height": 0,
+    "addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"]
   }'
 ```
 
@@ -244,7 +248,21 @@ go test -v -race -coverprofile=coverage.out ./...
 
 # View coverage report
 go tool cover -html=coverage.out
+
+# Run mainnet e2e tests (requires network access, ~15-20 min)
+# Note: Use -count=1 to disable test caching and force a fresh run
+go test -tags=e2e -v -count=1 -timeout 30m ./e2e/...
 ```
+
+The e2e tests will:
+1. Build and start the neutrinod binary on a random available port
+2. Use a fresh temporary data directory for each run
+3. Connect to mainnet peers and sync block headers/filters
+4. Verify API endpoints with real blockchain data (genesis block, block 100000, etc.)
+5. Test address watching and UTXO queries
+6. Properly cleanup the server process and temporary files
+
+**Note:** Go caches test results by default. To force a fresh run every time, use the `-count=1` flag as shown above.
 
 ### Pre-commit Hooks
 
