@@ -22,10 +22,6 @@ func TestNewRescanManager(t *testing.T) {
 		utxoSet:      make(map[string]UTXO),
 	}
 
-	if mgr == nil {
-		t.Fatal("expected non-nil RescanManager")
-	}
-
 	if mgr.logger == nil {
 		t.Error("expected logger to be set")
 	}
