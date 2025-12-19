@@ -187,7 +187,7 @@ func (n *Node) Start() error {
 	n.logger.Info("Chain service started successfully")
 
 	// Create rescan manager
-	n.rescanMgr = NewRescanManager(n.chainService)
+	n.rescanMgr = NewRescanManager(n.chainService, n.logger)
 
 	// Start sync monitoring goroutine
 	go n.monitorSync()

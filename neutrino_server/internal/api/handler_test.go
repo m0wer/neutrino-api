@@ -235,3 +235,143 @@ func TestErrorResponse(t *testing.T) {
 		t.Errorf("unexpected error message: %v", response["error"])
 	}
 }
+
+func TestHandleRescan_Success(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/rescan", handler.handleRescan).Methods("POST")
+
+	reqBody := map[string]any{
+		"start_height": 100,
+		"addresses":    []string{"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"},
+	}
+	jsonBody, _ := json.Marshal(reqBody)
+
+	req, err := http.NewRequest("POST", "/v1/rescan", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if response["status"] != "started" {
+		t.Errorf("expected status 'started', got %v", response["status"])
+	}
+}
+
+func TestHandleRescan_InvalidJSON(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/rescan", handler.handleRescan).Methods("POST")
+
+	req, err := http.NewRequest("POST", "/v1/rescan", bytes.NewBufferString("invalid json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusBadRequest {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusBadRequest)
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if response["error"] != "invalid request body" {
+		t.Errorf("unexpected error message: %v", response["error"])
+	}
+}
+
+func TestHandleGetUTXOs_Success(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxos", handler.handleGetUTXOs).Methods("POST")
+
+	reqBody := map[string]any{
+		"addresses": []string{"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"},
+	}
+	jsonBody, _ := json.Marshal(reqBody)
+
+	req, err := http.NewRequest("POST", "/v1/utxos", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if _, ok := response["utxos"]; !ok {
+		t.Error("expected 'utxos' field in response")
+	}
+}
+
+func TestHandleWatchAddress_Success(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/watch/address", handler.handleWatchAddress).Methods("POST")
+
+	reqBody := map[string]any{
+		"address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+	}
+	jsonBody, _ := json.Marshal(reqBody)
+
+	req, err := http.NewRequest("POST", "/v1/watch/address", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if response["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %v", response["status"])
+	}
+}

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Full block filter-based rescan implementation using BIP157/BIP158 compact filters
+- Comprehensive test suite for rescan functionality with 100% coverage of new features
+- Enhanced logging throughout rescan operations for better debugging
+- Asynchronous rescan execution to prevent blocking HTTP responses
+
+### Changed
+- RescanManager now uses key-based UTXO storage (`txid:vout`) instead of address-based lists
+- Rescan endpoint now returns immediately with "started" status and runs in background
+- RescanManager constructor now requires logger parameter for better observability
+- UTXO set implementation improved for O(1) lookups and duplicate prevention
+
+### Technical Details
+- Rescan now fetches full blocks only when filters match, improving efficiency
+- Tracks spent outputs during rescan to maintain accurate UTXO set
+- Added extensive debug logging for block scanning, filter matching, and UTXO discovery
+
 ## [0.1.0] - 2025-12-19
 
 ### Added
