@@ -28,9 +28,6 @@ curl -s http://localhost:8334/v1/status | jq
 ### Using Docker
 
 ```bash
-# Build the image
-docker build -t neutrino-api ./neutrino_server
-
 # Run for mainnet
 docker run -d \
   -p 8334:8334 \
