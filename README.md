@@ -37,7 +37,7 @@ docker run -d \
   -v neutrino-data:/data/neutrino \
   -e NETWORK=mainnet \
   -e LOG_LEVEL=info \
-  neutrino-api
+  ghcr.io/m0wer/neutrino-api
 
 # Run for regtest with custom Bitcoin node
 docker run -d \
@@ -46,7 +46,7 @@ docker run -d \
   -e NETWORK=regtest \
   -e CONNECT_PEERS=bitcoin-node:18444 \
   -e LOG_LEVEL=debug \
-  neutrino-api
+  ghcr.io/m0wer/neutrino-api
 ```
 
 ### Building from Source
@@ -264,23 +264,6 @@ The e2e tests will:
 
 **Note:** Go caches test results by default. To force a fresh run every time, use the `-count=1` flag as shown above.
 
-### Pre-commit Hooks
-
-Install pre-commit hooks for code quality:
-
-```bash
-# Install prek (pre-commit wrapper)
-pip install prek
-
-# Install hooks
-prek install
-
-# Run manually
-prek run --all-files
-```
-
-Note: Use `prek` instead of `pre-commit` for local development. GitHub Actions uses the standard pre-commit.
-
 ### Building Docker Image
 
 ```bash
@@ -294,7 +277,7 @@ docker build -t neutrino-api:latest ./neutrino_server
 ```yaml
 services:
   neutrino:
-    image: ghcr.io/yourusername/neutrino-api:latest
+    image: ghcr.io/m0wer/neutrino-api
     container_name: neutrino
     restart: unless-stopped
     environment:
@@ -371,45 +354,3 @@ volumes:
 ## License
 
 MIT License - See [LICENSE](LICENSE) file for details
-
-## Versioning
-
-This project uses [semantic versioning](https://semver.org/) with explicit tracking of the upstream Neutrino version. See [VERSIONING.md](VERSIONING.md) for details.
-
-Example version: `v1.0.0` (based on Neutrino v0.16.0)
-
-Check the version:
-
-```bash
-# From binary
-./neutrinod --version
-
-# From Docker
-docker run ghcr.io/yourusername/neutrino-api:latest neutrinod --version
-```
-
-## Releases
-
-Pre-built binaries and Docker images are available for each release:
-
-- **Binaries**: [GitHub Releases](https://github.com/yourusername/neutrino-api/releases)
-  - Linux (amd64, arm64)
-  - macOS (amd64, arm64)
-  - Windows (amd64)
-- **Docker**: `ghcr.io/yourusername/neutrino-api:latest`
-- **Changelog**: [CHANGELOG.md](CHANGELOG.md)
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
-
-## Support
-
-- Issues: [GitHub Issues](https://github.com/yourusername/neutrino-api/issues)
-- Discussions: [GitHub Discussions](https://github.com/yourusername/neutrino-api/discussions)
