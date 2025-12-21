@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2025-12-21
+
 ### Fixed
 - Fixed UTXO lookup endpoint to properly scan blocks using compact block filters
   - Replaced neutrino's `GetUtxo` method (which requires prior rescan) with manual block scanning
