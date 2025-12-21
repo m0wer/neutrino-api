@@ -44,6 +44,24 @@ func (m *mockNode) GetUTXOs(addresses []string) ([]neutrino.UTXO, error) {
 	return []neutrino.UTXO{}, nil
 }
 
+func (m *mockNode) GetUTXO(txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error) {
+	// Mock response for a spent UTXO
+	if txid == "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16" && vout == 0 {
+		return &neutrino.UTXOSpendReport{
+			Unspent:        false,
+			SpendingTxID:   "ea44e97271691990157559d0bdd9959e02790c34db6c006d779e82fa5aee708e",
+			SpendingInput:  0,
+			SpendingHeight: 91880,
+		}, nil
+	}
+	// Mock response for an unspent UTXO
+	return &neutrino.UTXOSpendReport{
+		Unspent:      true,
+		Value:        100000000,
+		ScriptPubKey: "76a914...",
+	}, nil
+}
+
 func (m *mockNode) WatchAddress(address string) error {
 	return nil
 }
@@ -373,5 +391,140 @@ func TestHandleWatchAddress_Success(t *testing.T) {
 
 	if response["status"] != "ok" {
 		t.Errorf("expected status 'ok', got %v", response["status"])
+	}
+}
+
+func TestHandleGetUTXO_Success(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxo/{txid}/{vout}", handler.handleGetUTXO).Methods("GET")
+
+	// Test unspent UTXO
+	req, err := http.NewRequest("GET", "/v1/utxo/abcd1234/0?address=bc1qtest&start_height=100", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	var response neutrino.UTXOSpendReport
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if !response.Unspent {
+		t.Error("expected unspent=true")
+	}
+
+	if response.Value != 100000000 {
+		t.Errorf("expected value=100000000, got %v", response.Value)
+	}
+}
+
+func TestHandleGetUTXO_Spent(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxo/{txid}/{vout}", handler.handleGetUTXO).Methods("GET")
+
+	// Test spent UTXO (Satoshi to Hal Finney transaction)
+	req, err := http.NewRequest("GET", "/v1/utxo/f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16/0?address=1Q2TWHE3GMdB6BZKafqwxXtWAWgFt5Jvm3&start_height=150", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	var response neutrino.UTXOSpendReport
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if response.Unspent {
+		t.Error("expected unspent=false")
+	}
+
+	if response.SpendingHeight != 91880 {
+		t.Errorf("expected spending_height=91880, got %v", response.SpendingHeight)
+	}
+}
+
+func TestHandleGetUTXO_InvalidVout(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxo/{txid}/{vout}", handler.handleGetUTXO).Methods("GET")
+
+	req, err := http.NewRequest("GET", "/v1/utxo/abcd1234/invalid", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusBadRequest {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusBadRequest)
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if response["error"] != "invalid vout" {
+		t.Errorf("unexpected error message: %v", response["error"])
+	}
+}
+
+func TestHandleGetUTXO_MissingAddress(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxo/{txid}/{vout}", handler.handleGetUTXO).Methods("GET")
+
+	// Request without address parameter
+	req, err := http.NewRequest("GET", "/v1/utxo/abcd1234/0?start_height=100", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusBadRequest {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusBadRequest)
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if response["error"] != "address parameter is required" {
+		t.Errorf("unexpected error message: %v", response["error"])
 	}
 }

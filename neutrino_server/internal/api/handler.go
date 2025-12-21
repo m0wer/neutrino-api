@@ -25,6 +25,7 @@ type NodeInterface interface {
 	GetBlockHash(height int32) (*chainhash.Hash, error)
 	BroadcastTransaction(tx *wire.MsgTx) error
 	GetUTXOs(addresses []string) ([]neutrino.UTXO, error)
+	GetUTXO(txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
 	WatchAddress(address string) error
 	Rescan(startHeight int32, addresses []string) error
 }
@@ -58,6 +59,7 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 
 	// UTXO operations
 	r.HandleFunc("/v1/utxos", h.handleGetUTXOs).Methods("POST")
+	r.HandleFunc("/v1/utxo/{txid}/{vout}", h.handleGetUTXO).Methods("GET")
 
 	// Watch operations
 	r.HandleFunc("/v1/watch/address", h.handleWatchAddress).Methods("POST")
@@ -209,6 +211,42 @@ func (h *Handler) handleGetUTXOs(w http.ResponseWriter, r *http.Request) {
 	h.jsonResponse(w, map[string]any{
 		"utxos": utxos,
 	})
+}
+
+// UTXO lookup endpoint
+func (h *Handler) handleGetUTXO(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	txid := vars["txid"]
+	voutStr := vars["vout"]
+
+	vout, err := strconv.ParseUint(voutStr, 10, 32)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid vout")
+		return
+	}
+
+	// Required address query parameter (needed for compact block filter matching)
+	address := r.URL.Query().Get("address")
+	if address == "" {
+		h.errorResponse(w, http.StatusBadRequest, "address parameter is required")
+		return
+	}
+
+	// Optional start_height query parameter
+	startHeight := int32(0)
+	if sh := r.URL.Query().Get("start_height"); sh != "" {
+		if parsed, err := strconv.ParseInt(sh, 10, 32); err == nil {
+			startHeight = int32(parsed)
+		}
+	}
+
+	report, err := h.node.GetUTXO(txid, uint32(vout), address, startHeight)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	h.jsonResponse(w, report)
 }
 
 // Watch address endpoint

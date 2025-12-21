@@ -60,13 +60,12 @@ func main() {
 
 	// Create neutrino node
 	nodeConfig := &neutrino.Config{
-		Network:         *network,
-		DataDir:         *dataDir,
-		ConnectPeers:    *connectPeers,
-		MaxPeers:        8,
-		FilterCacheSize: 5000,
-		Logger:          backend,
-		LogLevel:        *logLevel,
+		Network:      *network,
+		DataDir:      *dataDir,
+		ConnectPeers: *connectPeers,
+		MaxPeers:     8,
+		Logger:       backend,
+		LogLevel:     *logLevel,
 	}
 
 	node, err := neutrino.NewNode(nodeConfig)

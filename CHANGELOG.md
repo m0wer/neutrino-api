@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Fixed UTXO lookup endpoint to properly scan blocks using compact block filters
+  - Replaced neutrino's `GetUtxo` method (which requires prior rescan) with manual block scanning
+  - Now correctly finds UTXOs by scanning from `start_height` forward using BIP158 filters
+  - Detects both UTXO creation and any subsequent spends in a single scan
+  - Significantly improved performance when `start_height` is close to the block containing the transaction
+- Updated README examples with correct data:
+  - Fixed block header response for block 820000 with actual blockchain data
+  - Updated UTXO lookup example with modern SegWit transaction instead of old P2PK format
+  - Added performance guidance for UTXO lookups based on scan range
+
+### Added
+- New UTXO lookup endpoint (`GET /v1/utxo/{txid}/{vout}`) to check if a specific UTXO exists and whether it has been spent
+  - Requires `address` query parameter (needed for BIP158 compact block filter matching)
+  - Optional `start_height` query parameter to limit scan range
+  - Returns spend information if UTXO was spent (spending txid, input index, block height)
+- Test for missing address parameter validation on UTXO endpoint
+
+### Changed
+- README updated with UTXO endpoint documentation explaining why address is required
+- Enhanced performance notes for UTXO lookups with concrete timing examples
+
 ## [0.3.0] - 2025-12-19
 
 ### Added

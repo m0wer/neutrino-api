@@ -14,8 +14,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -304,6 +307,174 @@ func (n *Node) Rescan(startHeight int32, addresses []string) error {
 	}
 
 	return n.rescanMgr.Rescan(startHeight, addresses)
+}
+
+// UTXOSpendReport represents information about a UTXO.
+type UTXOSpendReport struct {
+	// If the output is unspent, these fields are populated
+	Unspent      bool   `json:"unspent"`
+	Value        int64  `json:"value,omitempty"`
+	ScriptPubKey string `json:"scriptpubkey,omitempty"`
+
+	// If the output has been spent, these fields are populated
+	SpendingTxID   string `json:"spending_txid,omitempty"`
+	SpendingInput  uint32 `json:"spending_input,omitempty"`
+	SpendingHeight uint32 `json:"spending_height,omitempty"`
+}
+
+// GetUTXO checks if a UTXO exists and whether it has been spent.
+// It scans from startHeight forward to the chain tip, looking for the UTXO creation
+// and any subsequent spend.
+//
+// IMPORTANT: address is REQUIRED because neutrino uses compact block filters (BIP158)
+// which match on scriptPubKeys, not outpoints. Without the address/script, we cannot
+// find the UTXO in the filters.
+//
+// startHeight should be set to the block height where the UTXO was created (or slightly before).
+// This is critical for performance - scanning from genesis is very slow.
+func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int32) (*UTXOSpendReport, error) {
+	if n.chainService == nil {
+		return nil, errors.New("chain service not initialized")
+	}
+
+	if address == "" {
+		return nil, errors.New("address is required: neutrino uses compact block filters which match on scripts, not outpoints")
+	}
+
+	// Parse the address to get the pkScript
+	addr, err := btcutil.DecodeAddress(address, n.chainParams)
+	if err != nil {
+		return nil, fmt.Errorf("invalid address %s: %w", address, err)
+	}
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create script for address %s: %w", address, err)
+	}
+
+	// Parse txid
+	targetHash, err := chainhash.NewHashFromStr(txid)
+	if err != nil {
+		return nil, fmt.Errorf("invalid txid: %w", err)
+	}
+
+	n.logger.Infof("Looking up UTXO %s:%d for address %s starting from height %d", txid, vout, address, startHeight)
+
+	// Get current best block
+	bestBlock, err := n.chainService.BestBlock()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get best block: %w", err)
+	}
+
+	endHeight := bestBlock.Height
+	n.logger.Debugf("Scanning from height %d to %d", startHeight, endHeight)
+
+	// Scan blocks to find the transaction and any spend
+	var foundTx *wire.MsgTx
+	var foundHeight int32
+	var spendingTxHash string
+	var spendingInputIdx uint32
+	var spendingHeight int32
+
+	for height := startHeight; height <= endHeight; height++ {
+		// Get block hash
+		blockHash, err := n.chainService.GetBlockHash(int64(height))
+		if err != nil {
+			n.logger.Debugf("Failed to get block hash for height %d: %v", height, err)
+			continue
+		}
+
+		// Get compact block filter
+		filter, err := n.chainService.GetCFilter(*blockHash, wire.GCSFilterRegular)
+		if err != nil {
+			n.logger.Debugf("Failed to get filter for block %d: %v", height, err)
+			continue
+		}
+
+		if filter == nil {
+			continue
+		}
+
+		// Check if the filter matches our pkScript
+		key := builder.DeriveKey(blockHash)
+		matched, err := filter.Match(key, pkScript)
+		if err != nil {
+			n.logger.Debugf("Filter match error for block %d: %v", height, err)
+			continue
+		}
+
+		if !matched {
+			continue
+		}
+
+		n.logger.Debugf("Block %d filter matched, fetching full block", height)
+
+		// Filter matched - fetch the full block
+		block, err := n.chainService.GetBlock(*blockHash)
+		if err != nil {
+			n.logger.Warnf("Failed to get block %d: %v", height, err)
+			continue
+		}
+
+		// Scan all transactions in the block
+		for _, tx := range block.Transactions() {
+			txHash := tx.Hash()
+
+			// Check if this is the transaction we're looking for
+			if foundTx == nil && txHash.IsEqual(targetHash) {
+				// Found the transaction creating the UTXO
+				if int(vout) < len(tx.MsgTx().TxOut) {
+					foundTx = tx.MsgTx()
+					foundHeight = height
+					n.logger.Infof("Found UTXO creation at height %d", height)
+				}
+			}
+
+			// Check if this transaction spends our UTXO
+			if foundTx != nil {
+				for inputIdx, txIn := range tx.MsgTx().TxIn {
+					prevOut := txIn.PreviousOutPoint
+					if prevOut.Hash.IsEqual(targetHash) && prevOut.Index == vout {
+						// Found the spending transaction
+						spendingTxHash = txHash.String()
+						spendingInputIdx = uint32(inputIdx)
+						spendingHeight = height
+						n.logger.Infof("Found UTXO spend at height %d in tx %s", height, spendingTxHash)
+						break
+					}
+				}
+			}
+		}
+
+		// If we found both creation and spend, we can stop
+		if foundTx != nil && spendingTxHash != "" {
+			break
+		}
+	}
+
+	// Build response
+	if foundTx == nil {
+		return nil, fmt.Errorf("UTXO not found: ensure start_height is at or before the block containing the transaction")
+	}
+
+	report := &UTXOSpendReport{}
+
+	if spendingTxHash == "" {
+		// UTXO is unspent
+		report.Unspent = true
+		txOut := foundTx.TxOut[vout]
+		report.Value = txOut.Value
+		report.ScriptPubKey = fmt.Sprintf("%x", txOut.PkScript)
+	} else {
+		// UTXO has been spent
+		report.Unspent = false
+		report.SpendingTxID = spendingTxHash
+		report.SpendingInput = spendingInputIdx
+		report.SpendingHeight = uint32(spendingHeight)
+	}
+
+	n.logger.Infof("UTXO %s:%d found at height %d, unspent=%v", txid, vout, foundHeight, report.Unspent)
+	return report, nil
 }
 
 // monitorSync monitors the sync status and updates internal state.

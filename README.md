@@ -117,14 +117,14 @@ curl http://localhost:8334/v1/block/820000/header
 Response:
 ```json
 {
-  "hash": "00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054",
+  "hash": "00000000000000000000ba232574c32b4f0cd023e133c05125310625626d6571",
   "height": 820000,
-  "timestamp": 1702000000,
-  "version": 536870912,
-  "prev_block": "00000000000000000003c2e5e7f3c4b0d7f2e8a1d5c3b6f4e7a9d8c1b2a5e6f3",
-  "merkle_root": "a7c4d8e2f5b9c3e6f8a1d4b7e9c2f5a8b3d6e9f2c5a8b1d4e7f9c2e5a8b3d6e9",
-  "bits": 386089497,
-  "nonce": 1234567890
+  "timestamp": 1701860856,
+  "version": 827375616,
+  "prev_block": "000000000000000000002660d26de87c900f770430d209814b238d15b17a0cfe",
+  "merkle_root": "e19b5e3ecaee81f04acd80b5298de8d8e0744aee9e88835dd07c42e478d2a3d4",
+  "bits": 386147408,
+  "nonce": 3717997606
 }
 ```
 
@@ -158,14 +158,21 @@ curl -X POST http://localhost:8334/v1/watch/address \
 
 ### Get UTXOs
 
-Query UTXOs for a list of addresses:
+Query UTXOs for a list of addresses (requires prior rescan to populate UTXO set):
 
 ```bash
-# Query UTXOs for historical Bitcoin addresses
-# (requires prior rescan to populate UTXO set)
+# First, do a rescan to populate the UTXO set for your addresses
+curl -X POST http://localhost:8334/v1/rescan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "start_height": 0,
+    "addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"]
+  }'
+
+# Then query UTXOs
 curl -X POST http://localhost:8334/v1/utxos \
   -H "Content-Type: application/json" \
-  -d '{"addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S", "1Q2TWHE3GMdB6BZKafqwxXtWAWgFt5Jvm3"]}'
+  -d '{"addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"]}'
 ```
 
 Response:
@@ -173,16 +180,52 @@ Response:
 {
   "utxos": [
     {
-      "txid": "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16",
+      "txid": "0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9",
       "vout": 0,
       "value": 5000000000,
-      "address": "1Q2TWHE3GMdB6BZKafqwxXtWAWgFt5Jvm3",
-      "scriptpubkey": "76a914...",
-      "height": 170
+      "address": "12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S",
+      "scriptpubkey": "410411db93e1dcdb8a016b49840f8c53bc1eb68a382e97b1482ecad7b148a6909a5cb2e0eaddfb84ccf9744464f82e160bfa9b8b64f9d4c03f999b8643f656b412a3ac",
+      "height": 9
     }
   ]
 }
 ```
+
+### Check UTXO Status
+
+Check if a specific UTXO exists and whether it has been spent. This endpoint requires knowing the address that owns the UTXO, because neutrino uses compact block filters (BIP158) which match on scripts/addresses, not transaction outpoints.
+
+```bash
+# Check a recent UTXO status
+# Required: address - the Bitcoin address that owns/owned this output
+# Optional: start_height - block height to start scanning from (highly recommended for performance)
+curl "http://localhost:8334/v1/utxo/4b36c31dacf6a1b72cfd9cece16813001921b14f4413dce9278899d218a25044/0?address=bc1qs8efrjj5nrkfgxcpfll5wxfqrwngjww4vxdggs&start_height=928819"
+```
+
+Response for unspent UTXO:
+```json
+{
+  "unspent": true,
+  "value": 11516,
+  "scriptpubkey": "001481f291ca5498ec941b014fff4719201ba68939d5"
+}
+```
+
+Response for spent UTXO:
+```json
+{
+  "unspent": false,
+  "spending_txid": "a1b2c3d4e5f6...",
+  "spending_input": 0,
+  "spending_height": 928820
+}
+```
+
+**Important Notes**:
+- The `address` parameter is **required**. Compact block filters (BIP158) work by matching on scripts, not transaction IDs. Without the address, filter matching cannot work correctly.
+- Specifying a `start_height` parameter is **highly recommended** for performance. Set it to the block height where the UTXO was created (or slightly before). Without it, the scan could take a very long time as it scans from the provided height to the current chain tip.
+- The `start_height` means "start scanning FROM this height going FORWARD to the chain tip", not backwards.
+- Performance scales with the scan range: scanning 1 block takes ~0.01s, scanning 100 blocks takes ~0.5s, scanning 10,000+ blocks can take minutes.
 
 ### Rescan
 
