@@ -1,8 +1,6 @@
 module github.com/yourusername/neutrino-api/neutrino_server
 
-go 1.24.0
-
-toolchain go1.24.4
+go 1.25
 
 require (
 	github.com/btcsuite/btcd v0.24.0

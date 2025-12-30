@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Comprehensive documentation with usage examples
   - Note: Neutrino may log cosmetic "unsupported IP type" warnings for .onion addresses, but connections work perfectly
 
+### Changed
+- Updated Go version requirement to 1.25 (from 1.21) for latest dependency compatibility
+- Updated Docker base image to golang:1.25-alpine
+- Updated all CI/CD workflows to use Go 1.25
+
 ## [0.4.0] - 2025-12-21
 
 ### Fixed
