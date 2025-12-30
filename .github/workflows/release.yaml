@@ -64,7 +64,9 @@ jobs:
         run: |
           gh release create ${{ steps.get_version.outputs.version }} \
             --title "${{ steps.get_version.outputs.version }}" \
-            --notes "${{ steps.extract_notes.outputs.notes }}"
+            --notes-file - <<'EOF'
+          ${{ steps.extract_notes.outputs.notes }}
+          EOF
 
   build-binaries:
     needs: create-release
