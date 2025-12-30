@@ -83,6 +83,20 @@ func TestNewNode(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "valid config with Tor proxy",
+			config: &Config{
+				Network:         "mainnet",
+				DataDir:         "/tmp/test",
+				TorProxy:        "127.0.0.1:9050",
+				MaxPeers:        8,
+				BanDuration:     24 * time.Hour,
+				FilterCacheSize: 4096,
+				Logger:          backend,
+				LogLevel:        "info",
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

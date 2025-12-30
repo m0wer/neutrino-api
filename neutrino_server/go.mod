@@ -1,6 +1,8 @@
 module github.com/yourusername/neutrino-api/neutrino_server
 
-go 1.21
+go 1.24.0
+
+toolchain go1.24.4
 
 require (
 	github.com/btcsuite/btcd v0.24.0
@@ -10,6 +12,7 @@ require (
 	github.com/btcsuite/btcwallet/walletdb v1.3.5
 	github.com/gorilla/mux v1.8.1
 	github.com/lightninglabs/neutrino v0.16.0
+	golang.org/x/net v0.48.0
 )
 
 require (
@@ -28,6 +31,6 @@ require (
 	github.com/lightningnetwork/lnd/queue v1.0.1 // indirect
 	github.com/lightningnetwork/lnd/ticker v1.0.0 // indirect
 	go.etcd.io/bbolt v1.3.5-0.20200615073812-232d8fc87f50 // indirect
-	golang.org/x/crypto v0.1.0 // indirect
-	golang.org/x/sys v0.1.0 // indirect
+	golang.org/x/crypto v0.46.0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
 )

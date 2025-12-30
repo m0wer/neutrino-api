@@ -72,6 +72,7 @@ go build -o neutrinod ./cmd/neutrinod
 | `DATA_DIR` | `/data/neutrino` | Data directory for headers and filters |
 | `LOG_LEVEL` | `info` | Log level (trace, debug, info, warn, error) |
 | `CONNECT_PEERS` | | Comma-separated list of peers (e.g., `node1:8333,node2:8333`) |
+| `TOR_PROXY` | | Tor SOCKS5 proxy address (e.g., `127.0.0.1:9050`) |
 | `MAX_PEERS` | `8` | Maximum number of peers to connect to |
 
 ### Command Line Flags
@@ -83,7 +84,78 @@ go build -o neutrinod ./cmd/neutrinod
   --datadir=/data/neutrino \
   --loglevel=info \
   --connect=peer1:8333,peer2:8333 \
+  --torproxy=127.0.0.1:9050 \
   --maxpeers=8
+```
+
+## Using with Tor
+
+Neutrino supports routing all Bitcoin P2P connections through Tor for enhanced privacy. This prevents peers from learning your IP address.
+
+### Docker Compose with Tor
+
+```yaml
+services:
+  tor:
+    image: ghcr.io/m0wer/docker-tor:latest
+    container_name: tor
+    restart: unless-stopped
+    ports:
+      - "9050:9050"
+
+  neutrino:
+    image: ghcr.io/m0wer/neutrino-api
+    container_name: neutrino
+    restart: unless-stopped
+    environment:
+      - NETWORK=mainnet
+      - LISTEN_ADDR=0.0.0.0:8334
+      - TOR_PROXY=tor:9050
+      - LOG_LEVEL=info
+    ports:
+      - "8334:8334"
+    volumes:
+      - neutrino-data:/data/neutrino
+    depends_on:
+      - tor
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8334/v1/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  neutrino-data:
+```
+
+### Using Docker Run
+
+```bash
+# Start Tor proxy
+docker run -d --name tor -p 9050:9050 ghcr.io/m0wer/docker-tor:latest
+
+# Run neutrino with Tor
+docker run -d \
+  -p 8334:8334 \
+  -v neutrino-data:/data/neutrino \
+  -e NETWORK=mainnet \
+  -e TOR_PROXY=host.docker.internal:9050 \
+  -e LOG_LEVEL=info \
+  ghcr.io/m0wer/neutrino-api
+```
+
+**Note:** When running Tor and neutrino in separate containers, use `host.docker.internal:9050` (on macOS/Windows) or `--network host` (on Linux) to access the Tor proxy.
+
+### Using Local Tor Installation
+
+If you have Tor installed locally:
+
+```bash
+# Start Tor (default SOCKS5 proxy on 127.0.0.1:9050)
+tor
+
+# Run neutrino
+./neutrinod --network=mainnet --torproxy=127.0.0.1:9050
 ```
 
 ## API Reference

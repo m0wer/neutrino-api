@@ -9,6 +9,7 @@ package neutrino
 import (
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,12 +19,14 @@ import (
 	"github.com/btcsuite/btcd/btcutil/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb" // Import bbolt driver
 	"github.com/lightninglabs/neutrino"
+	"golang.org/x/net/proxy"
 )
 
 // Config holds configuration for the neutrino node.
@@ -167,6 +170,62 @@ func (n *Node) Start() error {
 		seeds := getDNSSeeds(n.config.Network)
 		neutrinoConfig.AddPeers = seeds
 		n.logger.Infof("No connect peers specified, using %d DNS seeds", len(seeds))
+	}
+
+	// Configure Tor proxy if specified
+	if n.config.TorProxy != "" {
+		n.logger.Infof("Configuring Tor SOCKS5 proxy: %s", n.config.TorProxy)
+
+		// Create a SOCKS5 dialer
+		torDialer, err := proxy.SOCKS5("tcp", n.config.TorProxy, nil, proxy.Direct)
+		if err != nil {
+			n.db.Close()
+			return fmt.Errorf("failed to create Tor SOCKS5 dialer: %w", err)
+		}
+
+		// Set up DNS resolution through Tor to prevent DNS leaks
+		// Use btcd's connmgr.TorLookupIP for actual DNS resolution via Tor
+		neutrinoConfig.NameResolver = func(host string) ([]net.IP, error) {
+			// If already an IP, return it directly
+			if ip := net.ParseIP(host); ip != nil {
+				return []net.IP{ip}, nil
+			}
+
+			// For .onion addresses, encode as IP bytes to preserve the hostname
+			// Note: This causes "unsupported IP type" warnings in neutrino's logs,
+			// but they're cosmetic and don't affect functionality. The connection works perfectly.
+			if strings.HasSuffix(host, ".onion") {
+				return []net.IP{net.IP([]byte(host))}, nil
+			}
+
+			// For regular DNS names, resolve through Tor
+			// This performs actual DNS resolution via Tor's SOCKS proxy
+			ips, err := connmgr.TorLookupIP(host, n.config.TorProxy)
+			if err != nil {
+				n.logger.Warnf("Tor DNS lookup failed for %s: %v", host, err)
+				return nil, err
+			}
+
+			return ips, nil
+		}
+
+		// Set up the custom dialer that routes through Tor
+		neutrinoConfig.Dialer = func(addr net.Addr) (net.Conn, error) {
+			targetAddr := addr.String()
+
+			// Check if this is an encoded .onion address (IP length > 16)
+			if tcpAddr, ok := addr.(*net.TCPAddr); ok && len(tcpAddr.IP) > 16 {
+				// Recover the original .onion hostname from the IP bytes
+				hostname := string(tcpAddr.IP)
+				targetAddr = net.JoinHostPort(hostname, fmt.Sprintf("%d", tcpAddr.Port))
+			}
+
+			// Dial through Tor - it will handle .onion addresses
+			// For regular IPs, they've already been resolved via TorLookupIP
+			return torDialer.Dial("tcp", targetAddr)
+		}
+
+		n.logger.Info("Tor proxy configured successfully (DNS resolution via Tor)")
 	}
 
 	n.logger.Infof("Creating chain service for network: %s", n.chainParams.Name)

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Tor support for enhanced privacy (inspired by LND's implementation)
+  - Added `TOR_PROXY` environment variable and `--torproxy` command-line flag
+  - All Bitcoin P2P connections are routed through Tor SOCKS5 proxy
+  - DNS resolution performed through Tor using `connmgr.TorLookupIP` (prevents DNS leaks)
+  - Prevents peers from learning the node's IP address
+  - Full support for .onion addresses (Tor v3 hidden services)
+  - .onion addresses preserved as encoded bytes to maintain hostname through neutrino's address manager
+  - Regular DNS names properly resolved through Tor (returns actual IPs, not dummy values)
+  - Compatible with standard Tor installations (default: 127.0.0.1:9050)
+  - Docker Compose example with Tor proxy integration
+  - Comprehensive documentation with usage examples
+  - Note: Neutrino may log cosmetic "unsupported IP type" warnings for .onion addresses, but connections work perfectly
+
 ## [0.4.0] - 2025-12-21
 
 ### Fixed
