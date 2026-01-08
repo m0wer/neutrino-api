@@ -99,12 +99,6 @@ type PeersResponse struct {
 	Count int   `json:"count"`
 }
 
-// FeeEstimateResponse represents the /v1/fees/estimate response
-type FeeEstimateResponse struct {
-	FeeRate      int `json:"fee_rate"`
-	TargetBlocks int `json:"target_blocks"`
-}
-
 // UTXOsResponse represents the /v1/utxos response
 type UTXOsResponse struct {
 	UTXOs []struct {
@@ -192,7 +186,6 @@ func TestMainnetE2E(t *testing.T) {
 	t.Run("GenesisBlock", func(t *testing.T) { testGenesisBlock(t, baseURL) })
 	t.Run("Block100000", func(t *testing.T) { testBlock100000(t, baseURL) })
 	t.Run("Block500000", func(t *testing.T) { testBlock500000(t, baseURL) })
-	t.Run("FeeEstimate", func(t *testing.T) { testFeeEstimate(t, baseURL) })
 	t.Run("WatchAddress", func(t *testing.T) { testWatchAddress(t, baseURL) })
 	t.Run("UTXOs", func(t *testing.T) { testUTXOs(t, baseURL) })
 }
@@ -501,25 +494,6 @@ func testBlock500000(t *testing.T, baseURL string) {
 	// Verify height
 	if header.Height != 500000 {
 		t.Errorf("Block height should be 500000, got %d", header.Height)
-	}
-}
-
-func testFeeEstimate(t *testing.T, baseURL string) {
-	var fee FeeEstimateResponse
-	if err := getJSON(t, baseURL, "/v1/fees/estimate?target_blocks=6", &fee); err != nil {
-		t.Fatalf("Failed to get fee estimate: %v", err)
-	}
-
-	t.Logf("Fee estimate: fee_rate=%d sat/vB, target_blocks=%d", fee.FeeRate, fee.TargetBlocks)
-
-	// Fee rate should be positive
-	if fee.FeeRate <= 0 {
-		t.Errorf("Fee rate should be positive, got %d", fee.FeeRate)
-	}
-
-	// Target blocks should match our request
-	if fee.TargetBlocks != 6 {
-		t.Errorf("Target blocks should be 6, got %d", fee.TargetBlocks)
 	}
 }
 

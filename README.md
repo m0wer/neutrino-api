@@ -313,22 +313,6 @@ curl -X POST http://localhost:8334/v1/rescan \
   }'
 ```
 
-### Fee Estimation
-
-Get estimated fee rate for target confirmation blocks:
-
-```bash
-curl "http://localhost:8334/v1/fees/estimate?target_blocks=6"
-```
-
-Response:
-```json
-{
-  "fee_rate": 5,
-  "target_blocks": 6
-}
-```
-
 ### Peers
 
 Get connected peer information:

@@ -68,9 +68,6 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 	// Rescan
 	r.HandleFunc("/v1/rescan", h.handleRescan).Methods("POST")
 
-	// Fee estimation
-	r.HandleFunc("/v1/fees/estimate", h.handleEstimateFee).Methods("GET")
-
 	// Peers
 	r.HandleFunc("/v1/peers", h.handleGetPeers).Methods("GET")
 }
@@ -314,35 +311,6 @@ func (h *Handler) handleRescan(w http.ResponseWriter, r *http.Request) {
 
 	h.jsonResponse(w, map[string]string{
 		"status": "started",
-	})
-}
-
-// Fee estimation endpoint
-func (h *Handler) handleEstimateFee(w http.ResponseWriter, r *http.Request) {
-	targetBlocks := 6 // default
-	if tb := r.URL.Query().Get("target_blocks"); tb != "" {
-		if parsed, err := strconv.Atoi(tb); err == nil {
-			targetBlocks = parsed
-		}
-	}
-
-	// Neutrino doesn't have mempool-based fee estimation
-	// Return reasonable defaults based on target
-	var feeRate int
-	switch {
-	case targetBlocks <= 1:
-		feeRate = 20
-	case targetBlocks <= 3:
-		feeRate = 10
-	case targetBlocks <= 6:
-		feeRate = 5
-	default:
-		feeRate = 2
-	}
-
-	h.jsonResponse(w, map[string]any{
-		"fee_rate":      feeRate,
-		"target_blocks": targetBlocks,
 	})
 }
 

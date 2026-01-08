@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- Fee estimation endpoint (`/v1/fees/estimate`) - Neutrino light clients don't have access to mempool data anyway, so this endpoint was misleading
+
 ## [0.5.0] - 2025-12-30
 
 ### Added
@@ -102,7 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial Neutrino API Server implementation
-- REST API with 9 comprehensive endpoints:
+- REST API with 8 comprehensive endpoints:
   - Status and sync monitoring (`/v1/status`)
   - Block header queries (`/v1/block/{height}/header`)
   - Filter header queries (`/v1/block/{height}/filter_header`)
@@ -111,7 +114,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Address watching (`/v1/watch/address`)
   - Outpoint watching (`/v1/watch/outpoint`)
   - Blockchain rescanning (`/v1/rescan`)
-  - Fee estimation (`/v1/fees/estimate`)
   - Peer management (`/v1/peers`)
 - Docker support with multi-stage builds (13MB final image)
 - Docker Compose configuration with Bitcoin Core regtest example
@@ -136,7 +138,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RESTful JSON API
 - Configurable via CLI flags or environment variables
 
-[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/yourusername/neutrino-api/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/yourusername/neutrino-api/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/yourusername/neutrino-api/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yourusername/neutrino-api/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yourusername/neutrino-api/releases/tag/v0.1.0
