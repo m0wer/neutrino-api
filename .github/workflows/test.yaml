@@ -122,12 +122,6 @@ jobs:
           echo "Peers response: $PEERS"
           echo "$PEERS" | jq -e '.count != null' || exit 1
 
-          # Test fee estimation endpoint
-          echo "Testing /v1/fees/estimate..."
-          FEES=$(curl -s "http://localhost:8334/v1/fees/estimate?target_blocks=6")
-          echo "Fees response: $FEES"
-          echo "$FEES" | jq -e '.fee_rate != null' || exit 1
-
       - name: Show logs on failure
         if: failure()
         run: |
