@@ -397,13 +397,13 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 	}
 
 	if address == "" {
-		return nil, errors.New("address is required: neutrino uses compact block filters which match on scripts, not outpoints")
+		return nil, NewBadRequestError("address is required: neutrino uses compact block filters which match on scripts, not outpoints")
 	}
 
 	// Parse the address to get the pkScript
 	addr, err := btcutil.DecodeAddress(address, n.chainParams)
 	if err != nil {
-		return nil, fmt.Errorf("invalid address %s: %w", address, err)
+		return nil, NewBadRequestError(fmt.Sprintf("invalid address %s: %v", address, err))
 	}
 
 	pkScript, err := txscript.PayToAddrScript(addr)
@@ -414,7 +414,7 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 	// Parse txid
 	targetHash, err := chainhash.NewHashFromStr(txid)
 	if err != nil {
-		return nil, fmt.Errorf("invalid txid: %w", err)
+		return nil, NewBadRequestError(fmt.Sprintf("invalid txid: %v", err))
 	}
 
 	n.logger.Infof("Looking up UTXO %s:%d for address %s starting from height %d", txid, vout, address, startHeight)
@@ -513,7 +513,7 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 
 	// Build response
 	if foundTx == nil {
-		return nil, fmt.Errorf("UTXO not found: ensure start_height is at or before the block containing the transaction")
+		return nil, NewNotFoundError("UTXO", "UTXO not found: ensure start_height is at or before the block containing the transaction")
 	}
 
 	report := &UTXOSpendReport{}

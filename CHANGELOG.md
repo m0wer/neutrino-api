@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Fixed UTXO endpoint to return HTTP 404 (Not Found) instead of 500 (Internal Server Error) when UTXO is not found
+- Added proper error type handling for API errors:
+  - `NotFoundError` returns HTTP 404
+  - `BadRequestError` returns HTTP 400
+  - Invalid address or txid parameters now return 400 instead of 500
+
 ## [0.6.0] - 2026-01-08
 
 ### Removed

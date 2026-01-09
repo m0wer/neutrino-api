@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -239,7 +240,17 @@ func (h *Handler) handleGetUTXO(w http.ResponseWriter, r *http.Request) {
 
 	report, err := h.node.GetUTXO(txid, uint32(vout), address, startHeight)
 	if err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, err.Error())
+		// Check for typed errors to return appropriate status codes
+		var notFoundErr *neutrino.NotFoundError
+		var badRequestErr *neutrino.BadRequestError
+
+		if errors.As(err, &notFoundErr) {
+			h.errorResponse(w, http.StatusNotFound, err.Error())
+		} else if errors.As(err, &badRequestErr) {
+			h.errorResponse(w, http.StatusBadRequest, err.Error())
+		} else {
+			h.errorResponse(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
