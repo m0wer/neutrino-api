@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-01-09
+
 ### Fixed
 - Fixed UTXO endpoint to return HTTP 404 (Not Found) instead of 500 (Internal Server Error) when UTXO is not found
 - Added proper error type handling for API errors:
@@ -147,7 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RESTful JSON API
 - Configurable via CLI flags or environment variables
 
-[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/yourusername/neutrino-api/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/yourusername/neutrino-api/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/yourusername/neutrino-api/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/yourusername/neutrino-api/compare/v0.3.0...v0.4.0
