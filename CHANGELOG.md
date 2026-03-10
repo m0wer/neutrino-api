@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add block_height to UTXOSpendReport for more efficient scans.
+- Add `GET /v1/rescan/status` endpoint that returns `{"in_progress": bool}`, allowing clients to poll until a background rescan completes instead of using a fixed sleep.
+- Add `block_height` to `UTXOSpendReport` for more efficient scans.
 
 ## [0.6.1] - 2026-01-09
 

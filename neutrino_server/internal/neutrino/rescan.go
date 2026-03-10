@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/gcs/builder"
@@ -27,6 +28,10 @@ type RescanManager struct {
 	mu           sync.RWMutex
 	watchedAddrs map[string]btcutil.Address
 	utxoSet      map[string]UTXO // key: "txid:vout"
+
+	// rescanInProgress tracks the number of active rescans (atomic).
+	// Non-zero means a rescan goroutine is running.
+	rescanInProgress atomic.Int32
 }
 
 // NewRescanManager creates a new rescan manager.
@@ -94,6 +99,11 @@ func (r *RescanManager) GetUTXOs(addresses []string) ([]UTXO, error) {
 	return utxos, nil
 }
 
+// IsRescanInProgress returns true if a rescan goroutine is currently running.
+func (r *RescanManager) IsRescanInProgress() bool {
+	return r.rescanInProgress.Load() > 0
+}
+
 // Rescan triggers a rescan from the given height for specified addresses.
 // This uses neutrino's block filter-based scanning.
 func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
@@ -119,6 +129,10 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 	}
 
 	r.logger.Infof("Starting rescan from height %d for %d addresses", startHeight, len(addrs))
+
+	// Mark rescan as in-progress so callers can poll /v1/rescan/status.
+	r.rescanInProgress.Add(1)
+	defer r.rescanInProgress.Add(-1)
 
 	// Get current best block
 	bestBlock, err := r.chainService.BestBlock()

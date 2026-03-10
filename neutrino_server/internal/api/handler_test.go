@@ -70,6 +70,10 @@ func (m *mockNode) Rescan(startHeight int32, addresses []string) error {
 	return nil
 }
 
+func (m *mockNode) IsRescanInProgress() bool {
+	return false
+}
+
 func TestHandleGetStatus(t *testing.T) {
 	backend := btclog.NewBackend(os.Stdout)
 	logger := backend.Logger("TEST")
@@ -526,5 +530,36 @@ func TestHandleGetUTXO_MissingAddress(t *testing.T) {
 
 	if response["error"] != "address parameter is required" {
 		t.Errorf("unexpected error message: %v", response["error"])
+	}
+}
+
+func TestHandleGetRescanStatus_NotInProgress(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/rescan/status", handler.handleGetRescanStatus).Methods("GET")
+
+	req, err := http.NewRequest("GET", "/v1/rescan/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	var response map[string]bool
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if response["in_progress"] {
+		t.Error("expected in_progress=false")
 	}
 }

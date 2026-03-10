@@ -29,6 +29,7 @@ type NodeInterface interface {
 	GetUTXO(txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
 	WatchAddress(address string) error
 	Rescan(startHeight int32, addresses []string) error
+	IsRescanInProgress() bool
 }
 
 // Handler provides REST API endpoints for the neutrino node.
@@ -68,6 +69,7 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 
 	// Rescan
 	r.HandleFunc("/v1/rescan", h.handleRescan).Methods("POST")
+	r.HandleFunc("/v1/rescan/status", h.handleGetRescanStatus).Methods("GET")
 
 	// Peers
 	r.HandleFunc("/v1/peers", h.handleGetPeers).Methods("GET")
@@ -322,6 +324,14 @@ func (h *Handler) handleRescan(w http.ResponseWriter, r *http.Request) {
 
 	h.jsonResponse(w, map[string]string{
 		"status": "started",
+	})
+}
+
+// Rescan status endpoint
+func (h *Handler) handleGetRescanStatus(w http.ResponseWriter, r *http.Request) {
+	inProgress := h.node.IsRescanInProgress()
+	h.jsonResponse(w, map[string]bool{
+		"in_progress": inProgress,
 	})
 }
 

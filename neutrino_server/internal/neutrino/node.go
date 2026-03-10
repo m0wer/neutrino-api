@@ -368,6 +368,14 @@ func (n *Node) Rescan(startHeight int32, addresses []string) error {
 	return n.rescanMgr.Rescan(startHeight, addresses)
 }
 
+// IsRescanInProgress returns true if a rescan is currently running.
+func (n *Node) IsRescanInProgress() bool {
+	if n.rescanMgr == nil {
+		return false
+	}
+	return n.rescanMgr.IsRescanInProgress()
+}
+
 // UTXOSpendReport represents information about a UTXO.
 type UTXOSpendReport struct {
 	// If the output is unspent, these fields are populated
