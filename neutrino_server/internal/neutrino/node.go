@@ -374,6 +374,7 @@ type UTXOSpendReport struct {
 	Unspent      bool   `json:"unspent"`
 	Value        int64  `json:"value,omitempty"`
 	ScriptPubKey string `json:"scriptpubkey,omitempty"`
+	BlockHeight  uint32 `json:"block_height,omitempty"`
 
 	// If the output has been spent, these fields are populated
 	SpendingTxID   string `json:"spending_txid,omitempty"`
@@ -524,6 +525,7 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 		txOut := foundTx.TxOut[vout]
 		report.Value = txOut.Value
 		report.ScriptPubKey = fmt.Sprintf("%x", txOut.PkScript)
+		report.BlockHeight = uint32(foundHeight)
 	} else {
 		// UTXO has been spent
 		report.Unspent = false
