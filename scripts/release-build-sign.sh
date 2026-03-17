@@ -4,6 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+GO_VERSION="1.25.0"
+GO_IMAGE="golang:${GO_VERSION}-bookworm"
 
 usage() {
     cat <<EOF
@@ -44,12 +46,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for cmd in git go gpg sha256sum; do
+for cmd in git gpg sha256sum; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "Missing required command: $cmd" >&2
         exit 1
     fi
 done
+
+USE_DOCKER=false
+if command -v docker >/dev/null 2>&1; then
+    USE_DOCKER=true
+elif command -v go >/dev/null 2>&1; then
+    GO_ACTUAL="$(go version | awk '{print $3}')"
+    if [[ "$GO_ACTUAL" != "go${GO_VERSION}" ]]; then
+        echo "Go version mismatch: expected go${GO_VERSION}, got ${GO_ACTUAL}" >&2
+        echo "Install Go ${GO_VERSION} or install Docker to build inside ${GO_IMAGE}." >&2
+        exit 1
+    fi
+else
+    echo "Missing required command: docker or go" >&2
+    exit 1
+fi
 
 SOURCE_DATE_EPOCH="$(git -C "$REPO_ROOT" log -1 --pretty=%ct)"
 BUILD_DIR="$REPO_ROOT/tmp/release-build/$VERSION"
@@ -57,6 +74,7 @@ SIGNED_DIR="$REPO_ROOT/signatures/$VERSION"
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
+chmod 0777 "$BUILD_DIR"
 mkdir -p "$SIGNED_DIR"
 
 declare -a TARGETS=(
@@ -71,19 +89,40 @@ for target in "${TARGETS[@]}"; do
     read -r GOOS GOARCH OUTPUT <<<"$target"
     echo "Building $OUTPUT"
 
-    (
-        cd "$REPO_ROOT/neutrino_server"
-        GOOS="$GOOS" \
-        GOARCH="$GOARCH" \
-        CGO_ENABLED=0 \
-        SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-        go build \
-            -trimpath \
-            -buildvcs=false \
-            -ldflags="-buildid= -s -w -X main.version=${VERSION}" \
-            -o "$BUILD_DIR/$OUTPUT" \
-            ./cmd/neutrinod
-    )
+    if [[ "$USE_DOCKER" == true ]]; then
+        docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e GOOS="$GOOS" \
+            -e GOARCH="$GOARCH" \
+            -e CGO_ENABLED=0 \
+            -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+            -e GOCACHE=/tmp/go-build-cache \
+            -e GOPATH=/tmp/go \
+            -e GOMODCACHE=/tmp/go/pkg/mod \
+            -v "$REPO_ROOT:/workspace" \
+            -w /workspace/neutrino_server \
+            "$GO_IMAGE" \
+            go build \
+                -trimpath \
+                -buildvcs=false \
+                -ldflags="-buildid= -s -w -X main.version=${VERSION}" \
+                -o "/workspace/tmp/release-build/${VERSION}/${OUTPUT}" \
+                ./cmd/neutrinod
+    else
+        (
+            cd "$REPO_ROOT/neutrino_server"
+            GOOS="$GOOS" \
+            GOARCH="$GOARCH" \
+            CGO_ENABLED=0 \
+            SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+            go build \
+                -trimpath \
+                -buildvcs=false \
+                -ldflags="-buildid= -s -w -X main.version=${VERSION}" \
+                -o "$BUILD_DIR/$OUTPUT" \
+                ./cmd/neutrinod
+        )
+    fi
 done
 
 (
