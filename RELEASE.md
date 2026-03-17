@@ -22,7 +22,19 @@ git commit -m "Prepare release v1.0.0"
 git push origin main
 ```
 
-### 2. Create and Push Tag
+### 2. Build Reproducible Binaries and Sign Digest
+
+```bash
+# Build deterministic binaries and sign checksum file
+./scripts/release-build-sign.sh v1.0.0 --key 1C53A412D11EF3051704419C44912E1E03005B31
+
+# Commit signed digest artifacts
+git add signatures/v1.0.0/
+git commit -m "Add signed checksums for v1.0.0"
+git push origin main
+```
+
+### 3. Create and Push Tag
 
 ```bash
 # Create annotated tag
@@ -40,7 +52,7 @@ Changes:
 git push origin v1.0.0
 ```
 
-### 3. Monitor Release
+### 4. Monitor Release
 
 The GitHub Actions workflow will automatically:
 
@@ -54,8 +66,9 @@ The GitHub Actions workflow will automatically:
    - linux/arm64
 
 3. **Create GitHub Release** with:
-   - All binary archives
+   - All binaries
    - SHA256SUMS file
+   - SHA256SUMS.asc signature
    - Release notes
 
 4. **Push Docker Images** to:
@@ -66,23 +79,33 @@ The GitHub Actions workflow will automatically:
 
 Monitor at: `https://github.com/yourusername/neutrino-api/actions`
 
-### 4. Verify Release
+### 5. Verify Release
 
 ```bash
 # Check GitHub release page
 open https://github.com/yourusername/neutrino-api/releases
 
 # Test binary download
-wget https://github.com/yourusername/neutrino-api/releases/download/v1.0.0/neutrinod-linux-amd64.tar.gz
-tar -xzf neutrinod-linux-amd64.tar.gz
+wget https://github.com/yourusername/neutrino-api/releases/download/v1.0.0/neutrinod-linux-amd64
+chmod +x neutrinod-linux-amd64
 ./neutrinod-linux-amd64 --version
+
+# Verify signed checksums
+wget https://github.com/yourusername/neutrino-api/releases/download/v1.0.0/SHA256SUMS
+wget https://github.com/yourusername/neutrino-api/releases/download/v1.0.0/SHA256SUMS.asc
+gpg --import signatures/pubkeys/1C53A412D11EF3051704419C44912E1E03005B31.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum -c SHA256SUMS
+
+# Reproduce all binaries locally and compare to the signed digest
+./scripts/verify-release-build.sh v1.0.0
 
 # Test Docker image
 docker pull ghcr.io/yourusername/neutrino-api:v1.0.0
 docker run --rm ghcr.io/yourusername/neutrino-api:v1.0.0 neutrinod --version
 ```
 
-### 5. Announce Release
+### 6. Announce Release
 
 - Update project README if needed
 - Post in relevant communities

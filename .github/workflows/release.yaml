@@ -96,6 +96,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Get reproducible build timestamp
+        id: source_date
+        run: echo "epoch=$(git log -1 --pretty=%ct)" >> $GITHUB_OUTPUT
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -112,22 +116,23 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
+          SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
         run: |
           VERSION=${{ needs.create-release.outputs.version }}
-          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
-          COMMIT_HASH=$(git rev-parse --short HEAD)
 
           go build \
-            -ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.commit=${COMMIT_HASH}" \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags="-buildid= -s -w -X main.version=${VERSION}" \
             -o ${{ matrix.output }} \
             ./cmd/neutrinod
 
-      - name: Upload Release Asset
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload ${{ needs.create-release.outputs.version }} \
-            "neutrino_server/${{ matrix.output }}"
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.output }}
+          path: neutrino_server/${{ matrix.output }}
+          if-no-files-found: error
 
   build-docker:
     needs: create-release
@@ -189,26 +194,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p artifacts
-          cd artifacts
-          gh release download ${{ needs.create-release.outputs.version }} \
-            --repo ${{ github.repository }} \
-            --pattern 'neutrinod-*'
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: artifacts
+          merge-multiple: true
 
       - name: Generate checksums
         run: |
           cd artifacts
-          sha256sum * > SHA256SUMS
+          sha256sum neutrinod-* | sort > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Upload checksums
+      - name: Verify signed checksums from repository
+        run: |
+          VERSION=${{ needs.create-release.outputs.version }}
+          EXPECTED_DIR="signatures/${VERSION}"
+
+          test -f "${EXPECTED_DIR}/SHA256SUMS"
+          test -f "${EXPECTED_DIR}/SHA256SUMS.asc"
+
+          diff -u "${EXPECTED_DIR}/SHA256SUMS" "artifacts/SHA256SUMS"
+
+          for pubkey in signatures/pubkeys/*.asc; do
+            gpg --import "$pubkey"
+          done
+
+          gpg --verify "${EXPECTED_DIR}/SHA256SUMS.asc" "artifacts/SHA256SUMS"
+
+      - name: Upload binaries, checksums, and signature
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          VERSION=${{ needs.create-release.outputs.version }}
           gh release upload ${{ needs.create-release.outputs.version }} \
+            ./artifacts/neutrinod-* \
             ./artifacts/SHA256SUMS \
+            "./signatures/${VERSION}/SHA256SUMS.asc" \
             --repo ${{ github.repository }}

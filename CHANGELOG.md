@@ -9,7 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add reproducible release flow for `neutrinod` binaries with deterministic Go build flags and `SOURCE_DATE_EPOCH`.
+- Add `scripts/release-build-sign.sh` to build release binaries locally, generate `SHA256SUMS`, and create a detached GPG signature.
+- Add `scripts/verify-release-build.sh` as a one-command local reproducibility check against the signed digest.
+- Add release signature infrastructure under `signatures/` with trusted key list and m0wer public key.
 - Add `addPeers` setting, similar to `connectPeers`, that allows specifying peers to connect to without disabling peer discovery.
+
+### Changed
+
+- Update release workflow to rebuild binaries in CI, verify checksums against committed `signatures/<version>/SHA256SUMS`, verify `SHA256SUMS.asc`, and upload binaries plus signed digest files to GitHub releases.
 
 ## [0.7.0] - 2026-03-11
 

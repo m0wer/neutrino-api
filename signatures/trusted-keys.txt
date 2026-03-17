@@ -1,0 +1,4 @@
+# Trusted GPG keys for release digest verification
+# Format: <fingerprint> <name>
+
+1C53A412D11EF3051704419C44912E1E03005B31 m0wer

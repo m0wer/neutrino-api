@@ -61,6 +61,27 @@ go build -o neutrinod ./cmd/neutrinod
 ./neutrinod --network=mainnet --listen=0.0.0.0:8334
 ```
 
+## Reproducible Releases
+
+Release binaries are reproducible and tied to a signed digest:
+
+1. Build locally and sign checksums:
+
+```bash
+./scripts/release-build-sign.sh v1.0.0 --key 1C53A412D11EF3051704419C44912E1E03005B31
+```
+
+2. Commit `signatures/v1.0.0/SHA256SUMS` and `signatures/v1.0.0/SHA256SUMS.asc`.
+3. Push the release tag (`v1.0.0`).
+
+The release workflow rebuilds all binaries, verifies the resulting `SHA256SUMS` exactly matches the committed digest, verifies the GPG signature using keys in `signatures/pubkeys/`, and uploads binaries + `SHA256SUMS` + `SHA256SUMS.asc` to the GitHub release.
+
+Anyone can reproduce and verify a release locally with one command:
+
+```bash
+./scripts/verify-release-build.sh v1.0.0
+```
+
 ## Configuration
 
 ### Environment Variables

@@ -51,7 +51,18 @@ var (
 )
 ```
 
-### 2. Create a Tag
+### 2. Build and Sign Release Digest
+
+Before tagging, build artifacts locally and sign the checksum file:
+
+```bash
+./scripts/release-build-sign.sh v1.0.0 --key 1C53A412D11EF3051704419C44912E1E03005B31
+git add signatures/v1.0.0/
+git commit -m "Add signed checksums for v1.0.0"
+git push origin main
+```
+
+### 3. Create a Tag
 
 Tags should follow the format `v<MAJOR>.<MINOR>.<PATCH>`:
 
@@ -60,14 +71,21 @@ git tag -a v1.0.0 -m "Release v1.0.0 based on Neutrino v0.16.0"
 git push origin v1.0.0
 ```
 
-### 3. Automated Release
+### 4. Automated Release
 
 The GitHub Actions workflow (`.github/workflows/release.yaml`) will:
 
 1. Build binaries for multiple platforms (Linux, macOS, Windows on amd64/arm64)
 2. Create Docker images for multiple architectures
-3. Generate SHA256 checksums
-4. Create a GitHub release with all artifacts
+3. Regenerate SHA256 checksums and verify they exactly match `signatures/<version>/SHA256SUMS`
+4. Verify `signatures/<version>/SHA256SUMS.asc` with keys in `signatures/pubkeys/`
+5. Create a GitHub release with all artifacts, including `SHA256SUMS` and `SHA256SUMS.asc`
+
+Users can reproduce and verify locally with:
+
+```bash
+./scripts/verify-release-build.sh v1.0.0
+```
 
 ## Tracking Upstream Changes
 
