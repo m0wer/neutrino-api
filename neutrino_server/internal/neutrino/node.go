@@ -35,6 +35,7 @@ type Config struct {
 	DataDir         string
 	TorProxy        string
 	ConnectPeers    string
+	AddPeers        string
 	MaxPeers        int
 	BanDuration     time.Duration
 	FilterCacheSize int
@@ -153,6 +154,19 @@ func (n *Node) Start() error {
 	}
 
 	// Add peers if specified
+	if n.config.AddPeers != "" {
+		peers := strings.Split(n.config.AddPeers, ",")
+		for _, peer := range peers {
+			peer = strings.TrimSpace(peer)
+			if peer != "" {
+				n.logger.Infof("Adding preferred peer: %s", peer)
+				neutrinoConfig.AddPeers = append(neutrinoConfig.AddPeers, peer)
+			}
+		}
+		n.logger.Infof("Total add peers configured: %d", len(neutrinoConfig.AddPeers))
+	}
+
+	// Add peers if specified
 	if n.config.ConnectPeers != "" {
 		peers := strings.Split(n.config.ConnectPeers, ",")
 		for _, peer := range peers {
@@ -168,7 +182,11 @@ func (n *Node) Start() error {
 	// Add DNS seeds if no connect peers specified
 	if len(neutrinoConfig.ConnectPeers) == 0 {
 		seeds := getDNSSeeds(n.config.Network)
-		neutrinoConfig.AddPeers = seeds
+		if len(neutrinoConfig.AddPeers) > 0 {
+			neutrinoConfig.AddPeers = append(neutrinoConfig.AddPeers, seeds...)
+		} else {
+			neutrinoConfig.AddPeers = seeds
+		}
 		n.logger.Infof("No connect peers specified, using %d DNS seeds", len(seeds))
 	}
 
@@ -374,6 +392,14 @@ func (n *Node) IsRescanInProgress() bool {
 		return false
 	}
 	return n.rescanMgr.IsRescanInProgress()
+}
+
+// RescanStatus returns detailed rescan lifecycle status.
+func (n *Node) RescanStatus() RescanStatus {
+	if n.rescanMgr == nil {
+		return RescanStatus{}
+	}
+	return n.rescanMgr.GetRescanStatus()
 }
 
 // UTXOSpendReport represents information about a UTXO.

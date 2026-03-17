@@ -33,6 +33,7 @@ func main() {
 	dataDir := flag.String("datadir", getEnv("DATA_DIR", "/data/neutrino"), "Data directory for headers and filters")
 	logLevel := flag.String("loglevel", getEnv("LOG_LEVEL", "info"), "Log level (trace, debug, info, warn, error)")
 	connectPeers := flag.String("connect", getEnv("CONNECT_PEERS", ""), "Comma-separated list of peers to connect to")
+	addPeers := flag.String("addpeer", getEnv("ADD_PEERS", ""), "Comma-separated list of peers to add while still allowing discovery")
 	torProxy := flag.String("torproxy", getEnv("TOR_PROXY", ""), "Tor SOCKS5 proxy address (e.g., 127.0.0.1:9050)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
@@ -68,6 +69,7 @@ func main() {
 		DataDir:      *dataDir,
 		TorProxy:     *torProxy,
 		ConnectPeers: *connectPeers,
+		AddPeers:     *addPeers,
 		MaxPeers:     8,
 		Logger:       backend,
 		LogLevel:     *logLevel,

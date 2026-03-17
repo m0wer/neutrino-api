@@ -74,6 +74,10 @@ func (m *mockNode) IsRescanInProgress() bool {
 	return false
 }
 
+func (m *mockNode) RescanStatus() neutrino.RescanStatus {
+	return neutrino.RescanStatus{}
+}
+
 func TestHandleGetStatus(t *testing.T) {
 	backend := btclog.NewBackend(os.Stdout)
 	logger := backend.Logger("TEST")
@@ -554,12 +558,30 @@ func TestHandleGetRescanStatus_NotInProgress(t *testing.T) {
 		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 	}
 
-	var response map[string]bool
+	var response map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 		t.Fatalf("could not decode response: %v", err)
 	}
 
-	if response["in_progress"] {
+	inProgress, ok := response["in_progress"].(bool)
+	if !ok {
+		t.Fatalf("expected boolean in_progress, got %T", response["in_progress"])
+	}
+
+	if inProgress {
 		t.Error("expected in_progress=false")
+	}
+
+	if _, ok := response["last_started"]; !ok {
+		t.Error("expected last_started in response")
+	}
+	if _, ok := response["last_finished"]; !ok {
+		t.Error("expected last_finished in response")
+	}
+	if _, ok := response["last_start_height"]; !ok {
+		t.Error("expected last_start_height in response")
+	}
+	if _, ok := response["last_scanned_tip"]; !ok {
+		t.Error("expected last_scanned_tip in response")
 	}
 }

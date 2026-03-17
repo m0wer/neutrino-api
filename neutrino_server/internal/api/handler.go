@@ -30,6 +30,7 @@ type NodeInterface interface {
 	WatchAddress(address string) error
 	Rescan(startHeight int32, addresses []string) error
 	IsRescanInProgress() bool
+	RescanStatus() neutrino.RescanStatus
 }
 
 // Handler provides REST API endpoints for the neutrino node.
@@ -329,9 +330,14 @@ func (h *Handler) handleRescan(w http.ResponseWriter, r *http.Request) {
 
 // Rescan status endpoint
 func (h *Handler) handleGetRescanStatus(w http.ResponseWriter, r *http.Request) {
-	inProgress := h.node.IsRescanInProgress()
-	h.jsonResponse(w, map[string]bool{
-		"in_progress": inProgress,
+	status := h.node.RescanStatus()
+	h.jsonResponse(w, map[string]any{
+		"in_progress":       status.InProgress,
+		"last_started":      status.LastStarted,
+		"last_finished":     status.LastFinished,
+		"last_start_height": status.LastStartHeight,
+		"last_scanned_tip":  status.LastScannedTip,
+		"last_error":        status.LastError,
 	})
 }
 

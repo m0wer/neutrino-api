@@ -266,3 +266,26 @@ func TestRescanNilChainService(t *testing.T) {
 		t.Errorf("expected 'chain service not initialized', got '%s'", err.Error())
 	}
 }
+
+func TestGetRescanStatusDefaults(t *testing.T) {
+	backend := btclog.NewBackend(nil)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	status := mgr.GetRescanStatus()
+	if status.InProgress {
+		t.Error("expected InProgress=false")
+	}
+	if status.LastStarted != 0 {
+		t.Errorf("expected LastStarted=0, got %d", status.LastStarted)
+	}
+	if status.LastFinished != 0 {
+		t.Errorf("expected LastFinished=0, got %d", status.LastFinished)
+	}
+}

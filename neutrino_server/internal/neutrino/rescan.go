@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/gcs/builder"
@@ -32,6 +33,19 @@ type RescanManager struct {
 	// rescanInProgress tracks the number of active rescans (atomic).
 	// Non-zero means a rescan goroutine is running.
 	rescanInProgress atomic.Int32
+
+	statusMu sync.RWMutex
+	status   RescanStatus
+}
+
+// RescanStatus exposes rescan lifecycle details for API consumers.
+type RescanStatus struct {
+	InProgress      bool   `json:"in_progress"`
+	LastStarted     int64  `json:"last_started"`
+	LastFinished    int64  `json:"last_finished"`
+	LastStartHeight int32  `json:"last_start_height"`
+	LastScannedTip  int32  `json:"last_scanned_tip"`
+	LastError       string `json:"last_error,omitempty"`
 }
 
 // NewRescanManager creates a new rescan manager.
@@ -104,6 +118,16 @@ func (r *RescanManager) IsRescanInProgress() bool {
 	return r.rescanInProgress.Load() > 0
 }
 
+// GetRescanStatus returns the current detailed rescan status.
+func (r *RescanManager) GetRescanStatus() RescanStatus {
+	r.statusMu.RLock()
+	defer r.statusMu.RUnlock()
+
+	status := r.status
+	status.InProgress = r.IsRescanInProgress()
+	return status
+}
+
 // Rescan triggers a rescan from the given height for specified addresses.
 // This uses neutrino's block filter-based scanning.
 func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
@@ -129,6 +153,11 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 	}
 
 	r.logger.Infof("Starting rescan from height %d for %d addresses", startHeight, len(addrs))
+	r.statusMu.Lock()
+	r.status.LastStarted = time.Now().Unix()
+	r.status.LastStartHeight = startHeight
+	r.status.LastError = ""
+	r.statusMu.Unlock()
 
 	// Mark rescan as in-progress so callers can poll /v1/rescan/status.
 	r.rescanInProgress.Add(1)
@@ -141,7 +170,15 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 	}
 
 	// Scan blocks from startHeight to bestBlock.Height
-	return r.scanBlocks(startHeight, bestBlock.Height, addrs)
+	err = r.scanBlocks(startHeight, bestBlock.Height, addrs)
+	r.statusMu.Lock()
+	r.status.LastFinished = time.Now().Unix()
+	r.status.LastScannedTip = bestBlock.Height
+	if err != nil {
+		r.status.LastError = err.Error()
+	}
+	r.statusMu.Unlock()
+	return err
 }
 
 // scanBlocks scans blocks in the given range for transactions matching the addresses.
