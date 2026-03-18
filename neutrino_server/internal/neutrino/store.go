@@ -175,11 +175,11 @@ func (s *StateStore) LoadRescanMeta() (lastScannedTip, lastStartHeight int32, er
 	err = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketRescanMeta)
 
-		if tipBytes := b.Get(keyLastScannedTip); tipBytes != nil && len(tipBytes) == 4 {
+		if tipBytes := b.Get(keyLastScannedTip); len(tipBytes) == 4 {
 			lastScannedTip = int32(binary.BigEndian.Uint32(tipBytes))
 		}
 
-		if startBytes := b.Get(keyLastStartHeight); startBytes != nil && len(startBytes) == 4 {
+		if startBytes := b.Get(keyLastStartHeight); len(startBytes) == 4 {
 			lastStartHeight = int32(binary.BigEndian.Uint32(startBytes))
 		}
 
