@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Persistent state across restarts** (`rescan_state.db`): Watched addresses, UTXO set, and rescan metadata (last scanned tip, start height) are now persisted to a separate bbolt database. On restart, the server restores its previous state so UTXOs are available immediately without re-scanning. The state store uses three buckets (`watched_addrs`, `utxo_set`, `rescan_meta`) and is optional (nil = no persistence) for backward compatibility with tests.
+- **Incremental rescan**: When a rescan is requested with a `start_height` within the already-scanned range, the scan starts from `LastScannedTip+1` instead of re-scanning the entire range. If already up-to-date, returns immediately. This avoids redundant 52k+ block rescans after restarts.
+- **Rescan fallback to watched addresses**: `POST /v1/rescan` with an empty `addresses` field now falls back to all previously watched addresses instead of silently doing nothing.
+- **HTTP request/response logging middleware**: Every API call is logged with method, path, status code, and duration. 4xx/5xx responses log at WARN level; 2xx at INFO level.
+- **Rescan progress logging**: During block scanning, progress is logged every 10 seconds with blocks scanned/total, percentage, current height, blocks/sec, estimated time remaining, and filter match count. A final summary includes total blocks, duration, speed, filter matches, and detailed UTXO accounting (found/added/removed).
+- **Rescan handler request logging**: `POST /v1/rescan` now logs start_height, address count, and outpoint count at INFO level.
+
 ## [0.8.0] - 2026-03-17
 
 ### Added

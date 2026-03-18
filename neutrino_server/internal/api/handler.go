@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -49,6 +50,9 @@ func NewHandler(node NodeInterface, logger btclog.Logger) *Handler {
 
 // RegisterRoutes registers all API routes.
 func (h *Handler) RegisterRoutes(r *mux.Router) {
+	// Add request logging middleware.
+	r.Use(h.loggingMiddleware)
+
 	// Status
 	r.HandleFunc("/v1/status", h.handleGetStatus).Methods("GET")
 
@@ -74,6 +78,34 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 
 	// Peers
 	r.HandleFunc("/v1/peers", h.handleGetPeers).Methods("GET")
+}
+
+// statusRecorder wraps http.ResponseWriter to capture the status code.
+type statusRecorder struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rec *statusRecorder) WriteHeader(code int) {
+	rec.statusCode = code
+	rec.ResponseWriter.WriteHeader(code)
+}
+
+// loggingMiddleware logs every HTTP request with method, path, status, and duration.
+func (h *Handler) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		duration := time.Since(start)
+
+		// Use Warn level for errors (4xx/5xx), Info for everything else.
+		if rec.statusCode >= 400 {
+			h.logger.Warnf("%s %s -> %d (%s)", r.Method, r.URL.Path, rec.statusCode, duration.Round(time.Millisecond))
+		} else {
+			h.logger.Infof("%s %s -> %d (%s)", r.Method, r.URL.Path, rec.statusCode, duration.Round(time.Millisecond))
+		}
+	})
 }
 
 // Response helpers
@@ -315,6 +347,9 @@ func (h *Handler) handleRescan(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+
+	h.logger.Infof("Rescan requested: start_height=%d, addresses=%d, outpoints=%d",
+		req.StartHeight, len(req.Addresses), len(req.Outpoints))
 
 	// Start rescan in background goroutine to not block HTTP response
 	go func() {

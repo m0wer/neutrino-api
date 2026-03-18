@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -32,9 +33,11 @@ func main() {
 	listen := flag.String("listen", getEnv("LISTEN_ADDR", "0.0.0.0:8334"), "REST API listen address")
 	dataDir := flag.String("datadir", getEnv("DATA_DIR", "/data/neutrino"), "Data directory for headers and filters")
 	logLevel := flag.String("loglevel", getEnv("LOG_LEVEL", "info"), "Log level (trace, debug, info, warn, error)")
-	connectPeers := flag.String("connect", getEnv("CONNECT_PEERS", ""), "Comma-separated list of peers to connect to")
 	addPeers := flag.String("addpeer", getEnv("ADD_PEERS", ""), "Comma-separated list of peers to add while still allowing discovery")
 	torProxy := flag.String("torproxy", getEnv("TOR_PROXY", ""), "Tor SOCKS5 proxy address (e.g., 127.0.0.1:9050)")
+	prefetchFilters := flag.Bool("prefetchfilters", getEnvBool("PREFETCH_FILTERS", true), "Enable background compact filter prefetch")
+	prefetchWorkers := flag.Int("prefetchworkers", getEnvInt("PREFETCH_WORKERS", 0), "Number of workers for background filter prefetch (0=auto)")
+	prefetchStart := flag.Int("prefetchstart", getEnvInt("PREFETCH_START", 0), "Start height for background filter prefetch")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
 
@@ -65,14 +68,17 @@ func main() {
 
 	// Create neutrino node
 	nodeConfig := &neutrino.Config{
-		Network:      *network,
-		DataDir:      *dataDir,
-		TorProxy:     *torProxy,
-		ConnectPeers: *connectPeers,
-		AddPeers:     *addPeers,
-		MaxPeers:     8,
-		Logger:       backend,
-		LogLevel:     *logLevel,
+		Network:         *network,
+		DataDir:         *dataDir,
+		TorProxy:        *torProxy,
+		AddPeers:        *addPeers,
+		MaxPeers:        8,
+		FilterCacheSize: 100 * 1024 * 1024,
+		PrefetchFilters: *prefetchFilters,
+		PrefetchWorkers: *prefetchWorkers,
+		PrefetchStart:   int32(*prefetchStart),
+		Logger:          backend,
+		LogLevel:        *logLevel,
 	}
 
 	node, err := neutrino.NewNode(nodeConfig)
@@ -141,4 +147,32 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// getEnvBool returns a bool env var or a default value.
+func getEnvBool(key string, defaultValue bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
+}
+
+// getEnvInt returns an int env var or a default value.
+func getEnvInt(key string, defaultValue int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
 }

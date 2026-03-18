@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -34,11 +35,13 @@ type Config struct {
 	Network         string
 	DataDir         string
 	TorProxy        string
-	ConnectPeers    string
 	AddPeers        string
 	MaxPeers        int
 	BanDuration     time.Duration
 	FilterCacheSize int
+	PrefetchFilters bool
+	PrefetchWorkers int
+	PrefetchStart   int32
 	Logger          *btclog.Backend
 	LogLevel        string
 }
@@ -56,6 +59,12 @@ type Node struct {
 	synced       bool
 	blockHeight  int32
 	filterHeight int32
+
+	prefetchMu         sync.RWMutex
+	prefetchInProgress bool
+	prefetchLastHeight int32
+	prefetchQuit       chan struct{}
+	prefetchDone       chan struct{}
 }
 
 // UTXO represents an unspent transaction output.
@@ -107,15 +116,18 @@ func NewNode(config *Config) (*Node, error) {
 	logger.Infof("Initializing neutrino node for network: %s", config.Network)
 	logger.Infof("Data directory: %s", config.DataDir)
 	logger.Infof("Log level: %s", logLevel)
-	if config.ConnectPeers != "" {
-		logger.Infof("Connect peers: %s", config.ConnectPeers)
+	if config.AddPeers != "" {
+		logger.Infof("Preferred peers: %s", config.AddPeers)
 	}
 
 	node := &Node{
-		config:      config,
-		chainParams: chainParams,
-		logger:      logger,
+		config:       config,
+		chainParams:  chainParams,
+		logger:       logger,
+		prefetchQuit: make(chan struct{}),
+		prefetchDone: make(chan struct{}),
 	}
+	node.prefetchLastHeight = config.PrefetchStart - 1
 
 	return node, nil
 }
@@ -151,9 +163,10 @@ func (n *Node) Start() error {
 		Database:        db,
 		ChainParams:     *n.chainParams,
 		FilterCacheSize: uint64(n.config.FilterCacheSize),
+		PersistToDisk:   true,
 	}
 
-	// Add peers if specified
+	// Add preferred peers if specified (discovery remains enabled).
 	if n.config.AddPeers != "" {
 		peers := strings.Split(n.config.AddPeers, ",")
 		for _, peer := range peers {
@@ -166,28 +179,11 @@ func (n *Node) Start() error {
 		n.logger.Infof("Total add peers configured: %d", len(neutrinoConfig.AddPeers))
 	}
 
-	// Add peers if specified
-	if n.config.ConnectPeers != "" {
-		peers := strings.Split(n.config.ConnectPeers, ",")
-		for _, peer := range peers {
-			peer = strings.TrimSpace(peer)
-			if peer != "" {
-				n.logger.Infof("Adding connect peer: %s", peer)
-				neutrinoConfig.ConnectPeers = append(neutrinoConfig.ConnectPeers, peer)
-			}
-		}
-		n.logger.Infof("Total connect peers configured: %d", len(neutrinoConfig.ConnectPeers))
-	}
-
-	// Add DNS seeds if no connect peers specified
-	if len(neutrinoConfig.ConnectPeers) == 0 {
-		seeds := getDNSSeeds(n.config.Network)
-		if len(neutrinoConfig.AddPeers) > 0 {
-			neutrinoConfig.AddPeers = append(neutrinoConfig.AddPeers, seeds...)
-		} else {
-			neutrinoConfig.AddPeers = seeds
-		}
-		n.logger.Infof("No connect peers specified, using %d DNS seeds", len(seeds))
+	// Always add DNS seeds to preserve discovery and broaden filter-serving peer set.
+	seeds := getDNSSeeds(n.config.Network)
+	if len(seeds) > 0 {
+		neutrinoConfig.AddPeers = append(neutrinoConfig.AddPeers, seeds...)
+		n.logger.Infof("Using %d DNS seeds for discovery", len(seeds))
 	}
 
 	// Configure Tor proxy if specified
@@ -266,11 +262,23 @@ func (n *Node) Start() error {
 	}
 	n.logger.Info("Chain service started successfully")
 
-	// Create rescan manager
-	n.rescanMgr = NewRescanManager(n.chainService, n.logger)
+	// Open rescan state store for persistence
+	stateStore, err := OpenStateStore(n.config.DataDir, n.logger)
+	if err != nil {
+		n.logger.Warnf("Failed to open rescan state store (persistence disabled): %v", err)
+		// Non-fatal: fall back to in-memory only mode.
+		stateStore = nil
+	}
+
+	// Create rescan manager with persistence
+	n.rescanMgr = NewRescanManager(n.chainService, n.logger, stateStore)
 
 	// Start sync monitoring goroutine
 	go n.monitorSync()
+
+	if n.config.PrefetchFilters {
+		go n.prefetchFilters()
+	}
 
 	n.logger.Info("Neutrino node started")
 	return nil
@@ -279,6 +287,18 @@ func (n *Node) Start() error {
 // Stop gracefully stops the neutrino node.
 func (n *Node) Stop() error {
 	n.logger.Info("Stopping neutrino node...")
+
+	// Close rescan manager first (persists final state and closes state DB).
+	if n.rescanMgr != nil {
+		if err := n.rescanMgr.Close(); err != nil {
+			n.logger.Warnf("Failed to close rescan manager: %v", err)
+		}
+	}
+
+	if n.config.PrefetchFilters {
+		close(n.prefetchQuit)
+		<-n.prefetchDone
+	}
 
 	if n.chainService != nil {
 		if err := n.chainService.Stop(); err != nil {
@@ -633,6 +653,204 @@ func (n *Node) monitorSync() {
 			n.logger.Debugf("Syncing... blocks: %d, peers: %d, isCurrent: %v", bestBlock.Height, peerCount, isCurrent)
 		}
 	}
+}
+
+func computePrefetchWorkerCount(configured int) int {
+	if configured > 0 {
+		if configured > 32 {
+			return 32
+		}
+		return configured
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 4 {
+		workers = 4
+	}
+	if workers > 16 {
+		workers = 16
+	}
+	return workers
+}
+
+func (n *Node) prefetchFilters() {
+	defer close(n.prefetchDone)
+
+	workers := computePrefetchWorkerCount(n.config.PrefetchWorkers)
+	n.logger.Infof("Background filter prefetch enabled: workers=%d, start_height=%d", workers, n.config.PrefetchStart)
+
+	for {
+		select {
+		case <-n.prefetchQuit:
+			n.logger.Info("Background filter prefetch stopped")
+			return
+		default:
+		}
+
+		if n.chainService == nil {
+			if !n.prefetchSleep(2 * time.Second) {
+				return
+			}
+			continue
+		}
+
+		// Wait for initial header/filter-header sync.
+		if !n.chainService.IsCurrent() {
+			if !n.prefetchSleep(5 * time.Second) {
+				return
+			}
+			continue
+		}
+
+		n.runPrefetchPass(workers)
+
+		// Keep running in the background to fetch filters for newly arrived blocks.
+		if !n.prefetchSleep(15 * time.Second) {
+			return
+		}
+	}
+}
+
+func (n *Node) prefetchSleep(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+
+	select {
+	case <-n.prefetchQuit:
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+func (n *Node) runPrefetchPass(workers int) {
+	bestBlock, err := n.chainService.BestBlock()
+	if err != nil {
+		n.logger.Warnf("Prefetch: failed to get best block: %v", err)
+		return
+	}
+
+	n.prefetchMu.RLock()
+	start := n.prefetchLastHeight + 1
+	inProgress := n.prefetchInProgress
+	n.prefetchMu.RUnlock()
+
+	if inProgress {
+		return
+	}
+
+	if start < n.config.PrefetchStart {
+		start = n.config.PrefetchStart
+	}
+
+	if start > bestBlock.Height {
+		return
+	}
+
+	total := bestBlock.Height - start + 1
+	n.logger.Infof("Prefetch pass: heights %d..%d (%d blocks)", start, bestBlock.Height, total)
+
+	n.prefetchMu.Lock()
+	n.prefetchInProgress = true
+	n.prefetchMu.Unlock()
+	defer func() {
+		n.prefetchMu.Lock()
+		n.prefetchInProgress = false
+		n.prefetchMu.Unlock()
+	}()
+
+	type prefetchResult struct {
+		height int32
+		ok     bool
+	}
+
+	heightJobs := make(chan int32, workers*4)
+	results := make(chan prefetchResult, workers*4)
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for height := range heightJobs {
+				blockHash, err := n.chainService.GetBlockHash(int64(height))
+				if err != nil {
+					n.logger.Debugf("Prefetch: failed block hash at %d: %v", height, err)
+					results <- prefetchResult{height: height, ok: false}
+					continue
+				}
+
+				_, err = n.chainService.GetCFilter(*blockHash, wire.GCSFilterRegular)
+				if err != nil {
+					n.logger.Debugf("Prefetch: failed cfilter at %d: %v", height, err)
+					results <- prefetchResult{height: height, ok: false}
+					continue
+				}
+
+				results <- prefetchResult{height: height, ok: true}
+			}
+		}()
+	}
+
+	go func() {
+		for height := start; height <= bestBlock.Height; height++ {
+			select {
+			case <-n.prefetchQuit:
+				close(heightJobs)
+				wg.Wait()
+				close(results)
+				return
+			case heightJobs <- height:
+			}
+		}
+		close(heightJobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	started := time.Now()
+	lastLog := started
+	scanned := int32(0)
+	succeeded := int32(0)
+	maxSeen := start - 1
+
+	for res := range results {
+		scanned++
+		if res.ok {
+			succeeded++
+		}
+		if res.height > maxSeen {
+			maxSeen = res.height
+		}
+
+		now := time.Now()
+		if now.Sub(lastLog) >= 10*time.Second {
+			elapsed := now.Sub(started)
+			bps := float64(scanned) / elapsed.Seconds()
+			remaining := int32(0)
+			if bps > 0 {
+				remaining = int32(float64(total-scanned) / bps)
+			}
+			pct := float64(scanned) / float64(total) * 100
+			n.logger.Infof("Prefetch progress: %d/%d (%.1f%%) | height %d | %.1f blocks/sec | ~%ds remaining",
+				scanned, total, pct, maxSeen, bps, remaining)
+			lastLog = now
+		}
+	}
+
+	n.prefetchMu.Lock()
+	if maxSeen > n.prefetchLastHeight {
+		n.prefetchLastHeight = maxSeen
+	}
+	n.prefetchMu.Unlock()
+
+	elapsed := time.Since(started)
+	bps := float64(0)
+	if elapsed.Seconds() > 0 {
+		bps = float64(scanned) / elapsed.Seconds()
+	}
+	n.logger.Infof("Prefetch complete: %d/%d filters fetched in %s (%.1f blocks/sec), tip=%d",
+		succeeded, scanned, elapsed.Round(time.Millisecond), bps, bestBlock.Height)
 }
 
 // getChainParams returns the chain parameters for the given network.

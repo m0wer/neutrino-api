@@ -1,12 +1,34 @@
 package neutrino
 
 import (
+	"os"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btclog"
 )
+
+func TestComputeFilterWorkerCount(t *testing.T) {
+	tests := []struct {
+		name     string
+		gomax    int
+		expected int
+	}{
+		{name: "minimum", gomax: 1, expected: 2},
+		{name: "normal", gomax: 6, expected: 6},
+		{name: "maximum", gomax: 64, expected: 16},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeFilterWorkerCount(tt.gomax)
+			if got != tt.expected {
+				t.Fatalf("expected %d, got %d", tt.expected, got)
+			}
+		})
+	}
+}
 
 // TestNewRescanManager tests the creation of a new rescan manager.
 func TestNewRescanManager(t *testing.T) {
@@ -287,5 +309,270 @@ func TestGetRescanStatusDefaults(t *testing.T) {
 	}
 	if status.LastFinished != 0 {
 		t.Errorf("expected LastFinished=0, got %d", status.LastFinished)
+	}
+}
+
+// TestWatchAddressPersistence tests that WatchAddress persists addresses to the store.
+func TestWatchAddressPersistence(t *testing.T) {
+	dir := t.TempDir()
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	store, err := OpenStateStore(dir, logger)
+	if err != nil {
+		t.Fatalf("OpenStateStore() error: %v", err)
+	}
+	defer store.Close()
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		store:        store,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	addr := "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+	if err := mgr.WatchAddress(addr); err != nil {
+		t.Fatalf("WatchAddress() error: %v", err)
+	}
+
+	// Verify it was persisted to the store.
+	addrs, err := store.LoadWatchedAddrs()
+	if err != nil {
+		t.Fatalf("LoadWatchedAddrs() error: %v", err)
+	}
+	if len(addrs) != 1 || addrs[0] != addr {
+		t.Errorf("expected [%s], got %v", addr, addrs)
+	}
+}
+
+// TestLoadPersistedState tests that a RescanManager correctly loads persisted state.
+func TestLoadPersistedState(t *testing.T) {
+	dir := t.TempDir()
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	// Pre-populate the store with data.
+	store1, err := OpenStateStore(dir, logger)
+	if err != nil {
+		t.Fatalf("OpenStateStore() error: %v", err)
+	}
+
+	if err := store1.SaveWatchedAddr("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"); err != nil {
+		t.Fatalf("SaveWatchedAddr() error: %v", err)
+	}
+	if err := store1.SaveWatchedAddr("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"); err != nil {
+		t.Fatalf("SaveWatchedAddr() error: %v", err)
+	}
+	testUTXOs := map[string]UTXO{
+		"abc123:0": {TxID: "abc123", Vout: 0, Value: 69000000, Address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", Height: 295833},
+	}
+	if err := store1.SaveUTXOSet(testUTXOs); err != nil {
+		t.Fatalf("SaveUTXOSet() error: %v", err)
+	}
+	if err := store1.SaveRescanMeta(296102, 243542); err != nil {
+		t.Fatalf("SaveRescanMeta() error: %v", err)
+	}
+	store1.Close()
+
+	// Re-open the store and create a new RescanManager that should load from it.
+	store2, err := OpenStateStore(dir, logger)
+	if err != nil {
+		t.Fatalf("OpenStateStore() reopen error: %v", err)
+	}
+	defer store2.Close()
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		store:        store2,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+	mgr.loadPersistedState()
+
+	// Verify watched addresses were loaded.
+	if len(mgr.watchedAddrs) != 2 {
+		t.Errorf("expected 2 watched addresses, got %d", len(mgr.watchedAddrs))
+	}
+	if _, ok := mgr.watchedAddrs["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"]; !ok {
+		t.Error("expected address 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa to be loaded")
+	}
+
+	// Verify UTXOs were loaded.
+	if len(mgr.utxoSet) != 1 {
+		t.Errorf("expected 1 UTXO, got %d", len(mgr.utxoSet))
+	}
+	utxo, ok := mgr.utxoSet["abc123:0"]
+	if !ok {
+		t.Fatal("expected UTXO abc123:0 to be loaded")
+	}
+	if utxo.Value != 69000000 {
+		t.Errorf("expected UTXO value 69000000, got %d", utxo.Value)
+	}
+	if utxo.Height != 295833 {
+		t.Errorf("expected UTXO height 295833, got %d", utxo.Height)
+	}
+
+	// Verify rescan metadata was loaded into status.
+	if mgr.status.LastScannedTip != 296102 {
+		t.Errorf("expected LastScannedTip 296102, got %d", mgr.status.LastScannedTip)
+	}
+	if mgr.status.LastStartHeight != 243542 {
+		t.Errorf("expected LastStartHeight 243542, got %d", mgr.status.LastStartHeight)
+	}
+}
+
+// TestLoadPersistedStateInvalidAddress tests that invalid persisted addresses are skipped.
+func TestLoadPersistedStateInvalidAddress(t *testing.T) {
+	dir := t.TempDir()
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	store, err := OpenStateStore(dir, logger)
+	if err != nil {
+		t.Fatalf("OpenStateStore() error: %v", err)
+	}
+
+	// Save a valid and an invalid address.
+	if err := store.SaveWatchedAddr("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"); err != nil {
+		t.Fatalf("SaveWatchedAddr() error: %v", err)
+	}
+	if err := store.SaveWatchedAddr("not_a_real_address"); err != nil {
+		t.Fatalf("SaveWatchedAddr() error: %v", err)
+	}
+	store.Close()
+
+	store2, err := OpenStateStore(dir, logger)
+	if err != nil {
+		t.Fatalf("OpenStateStore() error: %v", err)
+	}
+	defer store2.Close()
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		store:        store2,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+	mgr.loadPersistedState()
+
+	// Only the valid address should be loaded.
+	if len(mgr.watchedAddrs) != 1 {
+		t.Errorf("expected 1 valid address after loading, got %d", len(mgr.watchedAddrs))
+	}
+}
+
+// TestRescanManagerCloseWithStore tests that Close properly closes the store.
+func TestRescanManagerCloseWithStore(t *testing.T) {
+	dir := t.TempDir()
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	store, err := OpenStateStore(dir, logger)
+	if err != nil {
+		t.Fatalf("OpenStateStore() error: %v", err)
+	}
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		store:        store,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	if err := mgr.Close(); err != nil {
+		t.Errorf("Close() error: %v", err)
+	}
+
+	// Subsequent close should not panic.
+	// The bolt.DB.Close() is idempotent, so this should be fine.
+}
+
+// TestRescanManagerCloseWithoutStore tests that Close works when store is nil.
+func TestRescanManagerCloseWithoutStore(t *testing.T) {
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       btclog.NewBackend(nil).Logger("TEST"),
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	if err := mgr.Close(); err != nil {
+		t.Errorf("Close() on nil store should not error, got: %v", err)
+	}
+}
+
+// TestRescanFallsBackToWatchedAddrs tests that Rescan() uses watched addresses
+// when called with an empty addresses list.
+func TestRescanFallsBackToWatchedAddrs(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		chainService: nil,
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	// Test 1: No watched addresses AND no explicit addresses — returns nil (nothing to scan).
+	err := mgr.Rescan(0, []string{})
+	if err != nil {
+		t.Fatalf("expected nil error for empty rescan with no watched addrs, got: %v", err)
+	}
+
+	// Test 2: With a watched address and empty explicit addresses, Rescan should
+	// fall back to using watched addresses and attempt the scan (which fails because
+	// chainService is nil — but the fallback happened).
+	addr, _ := btcutil.DecodeAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &chaincfg.MainNetParams)
+	mgr.watchedAddrs["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"] = addr
+
+	err = mgr.Rescan(0, []string{})
+	if err == nil {
+		t.Fatal("expected error from nil chain service, but got nil — rescan did not attempt to run")
+	}
+	if err.Error() != "chain service not initialized" {
+		t.Errorf("expected 'chain service not initialized', got '%s'", err.Error())
+	}
+}
+
+// TestRescanIncrementalSkip tests that Rescan() skips already-scanned block ranges
+// when persisted state indicates a prior scan covered the requested range.
+func TestRescanIncrementalSkip(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		chainService: nil,
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	// Simulate persisted state: already scanned 243542..296100.
+	mgr.status.LastScannedTip = 296100
+	mgr.status.LastStartHeight = 243542
+
+	// Add a watched address so we don't early-return from "no addresses".
+	addr, _ := btcutil.DecodeAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &chaincfg.MainNetParams)
+	mgr.watchedAddrs["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"] = addr
+
+	// Rescan with start_height=243542 (same as persisted start).
+	// This should attempt an incremental rescan from 296101, which will fail
+	// because chainService is nil — but the fact it fails means it attempted the scan.
+	err := mgr.Rescan(243542, []string{"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"})
+	if err == nil {
+		t.Fatal("expected error from nil chain service")
+	}
+
+	// Verify that LastStartHeight was set correctly.
+	if mgr.status.LastStartHeight != 243542 {
+		t.Errorf("expected LastStartHeight=243542, got %d", mgr.status.LastStartHeight)
 	}
 }

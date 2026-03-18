@@ -585,3 +585,54 @@ func TestHandleGetRescanStatus_NotInProgress(t *testing.T) {
 		t.Error("expected last_scanned_tip in response")
 	}
 }
+
+func TestLoggingMiddleware_Success(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req, err := http.NewRequest("GET", "/v1/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	// Verify the response is valid JSON (middleware should not interfere)
+	var response neutrino.Status
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+}
+
+func TestLoggingMiddleware_Error(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	// Invalid body should trigger 400
+	req, err := http.NewRequest("POST", "/v1/rescan", bytes.NewBufferString("invalid json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusBadRequest {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusBadRequest)
+	}
+}

@@ -41,7 +41,7 @@ docker run -d \
   -p 8334:8334 \
   -v neutrino-data:/data/neutrino \
   -e NETWORK=regtest \
-  -e CONNECT_PEERS=bitcoin-node:18444 \
+  -e ADD_PEERS=bitcoin-node:18444 \
   -e LOG_LEVEL=debug \
   ghcr.io/m0wer/neutrino-api
 ```
@@ -92,7 +92,7 @@ Anyone can reproduce and verify a release locally with one command:
 | `LISTEN_ADDR` | `0.0.0.0:8334` | REST API listen address |
 | `DATA_DIR` | `/data/neutrino` | Data directory for headers and filters |
 | `LOG_LEVEL` | `info` | Log level (trace, debug, info, warn, error) |
-| `CONNECT_PEERS` | | Comma-separated list of peers (e.g., `node1:8333,node2:8333`) |
+| `ADD_PEERS` | | Comma-separated list of preferred peers (e.g., `node1:8333,node2:8333`) while still allowing peer discovery |
 | `TOR_PROXY` | | Tor SOCKS5 proxy address (e.g., `127.0.0.1:9050`) |
 | `MAX_PEERS` | `8` | Maximum number of peers to connect to |
 
@@ -104,7 +104,7 @@ Anyone can reproduce and verify a release locally with one command:
   --listen=0.0.0.0:8334 \
   --datadir=/data/neutrino \
   --loglevel=info \
-  --connect=peer1:8333,peer2:8333 \
+  --addpeer=peer1:8333,peer2:8333 \
   --torproxy=127.0.0.1:9050 \
   --maxpeers=8
 ```

@@ -48,7 +48,7 @@ services:
       - LISTEN_ADDR=0.0.0.0:8334
       - DATA_DIR=/data/neutrino
       - LOG_LEVEL=debug
-      - CONNECT_PEERS=bitcoin:18444
+      - ADD_PEERS=bitcoin:18444
       - MAX_PEERS=8
     ports:
       - "8334:8334"

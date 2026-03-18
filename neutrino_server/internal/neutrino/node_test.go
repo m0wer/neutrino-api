@@ -62,7 +62,7 @@ func TestNewNode(t *testing.T) {
 			config: &Config{
 				Network:         "regtest",
 				DataDir:         "/tmp/test",
-				ConnectPeers:    "localhost:18444",
+				AddPeers:        "localhost:18444",
 				MaxPeers:        8,
 				BanDuration:     24 * time.Hour,
 				FilterCacheSize: 4096,
@@ -195,6 +195,31 @@ func TestGetStatus(t *testing.T) {
 
 	if status.Peers != 0 {
 		t.Errorf("expected 0 peers, got %d", status.Peers)
+	}
+}
+
+func TestComputePrefetchWorkerCount(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured int
+		expected   int
+	}{
+		{name: "configured", configured: 6, expected: 6},
+		{name: "configured capped", configured: 64, expected: 32},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computePrefetchWorkerCount(tt.configured)
+			if got != tt.expected {
+				t.Fatalf("expected %d workers, got %d", tt.expected, got)
+			}
+		})
+	}
+
+	auto := computePrefetchWorkerCount(0)
+	if auto < 4 || auto > 16 {
+		t.Fatalf("auto worker count out of bounds: %d", auto)
 	}
 }
 
