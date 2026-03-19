@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-03-19
+
 ### Added
 
 - **Persistent state across restarts** (`rescan_state.db`): Watched addresses, UTXO set, and rescan metadata (last scanned tip, start height) are now persisted to a separate bbolt database. On restart, the server restores its previous state so UTXOs are available immediately without re-scanning. The state store uses three buckets (`watched_addrs`, `utxo_set`, `rescan_meta`) and is optional (nil = no persistence) for backward compatibility with tests.
@@ -179,7 +181,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RESTful JSON API
 - Configurable via CLI flags or environment variables
 
-[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/yourusername/neutrino-api/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/yourusername/neutrino-api/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/yourusername/neutrino-api/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/yourusername/neutrino-api/compare/v0.6.0...v0.6.1
