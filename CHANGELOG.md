@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Spent UTXO detection in bulk endpoint**: `POST /v1/utxos` could return already-spent UTXOs because the batch `MatchAny` filter scan missed spending blocks in certain cases. Added a per-UTXO spend verification pass after the main scan that uses single-script `filter.Match` (the same approach used by the reliable `GET /v1/utxo/{txid}/{vout}` endpoint) to catch any spends missed by the batch scan.
+
 ## [0.9.0] - 2026-03-19
 
 ### Added

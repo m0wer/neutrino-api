@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
@@ -501,11 +502,10 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 
 	elapsed := time.Since(scanStart)
 
-	// Update UTXO set
+	// Update UTXO set (preliminary — before spend verification).
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
-	// Add new UTXOs (if not spent)
+	// Add new UTXOs (if not spent in this scan batch).
 	added := 0
 	for utxoKey, utxo := range foundUTXOs {
 		if !spentOutputs[utxoKey] {
@@ -514,7 +514,7 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 		}
 	}
 
-	// Remove spent UTXOs
+	// Remove spent UTXOs detected by the batch filter scan.
 	removed := 0
 	for utxoKey := range spentOutputs {
 		if _, existed := r.utxoSet[utxoKey]; existed {
@@ -523,6 +523,14 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 		}
 	}
 
+	// Snapshot the current UTXO set for the spend verification pass.
+	// We need to release the lock before doing network I/O.
+	utxoSnapshot := make(map[string]UTXO, len(r.utxoSet))
+	for k, v := range r.utxoSet {
+		utxoSnapshot[k] = v
+	}
+	r.mu.Unlock()
+
 	blocksPerSec := float64(0)
 	if elapsed.Seconds() > 0 {
 		blocksPerSec = float64(blocksScanned) / elapsed.Seconds()
@@ -530,7 +538,128 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 	r.logger.Infof("Scan complete: %d blocks in %s (%.1f blocks/sec) | %d filter matches | %d UTXOs found, %d added, %d spent removed | total UTXO set: %d",
 		blocksScanned, elapsed.Round(time.Millisecond), blocksPerSec,
 		filterMatches, len(foundUTXOs), added, removed, len(r.utxoSet))
+
+	// Phase 3: Spend verification pass.
+	// The batch MatchAny filter scan can miss spends in certain cases (e.g.
+	// subtle differences in multi-script vs single-script filter matching).
+	// Verify each UTXO individually using per-script filter.Match, the same
+	// approach used by GetUTXO which is known to be reliable.
+	verifiedSpent := r.verifyUTXOsUnspent(utxoSnapshot, startHeight, endHeight)
+	if verifiedSpent > 0 {
+		r.logger.Infof("Spend verification removed %d additional spent UTXOs", verifiedSpent)
+	}
+
 	return nil
+}
+
+// verifyUTXOsUnspent performs a per-UTXO spend check for all UTXOs in the
+// snapshot. For each UTXO, it scans block filters from the UTXO's creation
+// height to endHeight using single-script filter.Match (not MatchAny). Any
+// block that matches is downloaded and checked for transactions spending the
+// UTXO. Confirmed spends are removed from r.utxoSet.
+//
+// This is a defense-in-depth measure: the main batch scan (MatchAny) should
+// catch most spends, but this pass ensures none are missed.
+func (r *RescanManager) verifyUTXOsUnspent(
+	snapshot map[string]UTXO, scanStart, scanEnd int32,
+) int {
+	if len(snapshot) == 0 {
+		return 0
+	}
+
+	r.logger.Infof("Spend verification: checking %d UTXOs for spends in range %d..%d",
+		len(snapshot), scanStart, scanEnd)
+	verifyStart := time.Now()
+	removed := 0
+
+	for utxoKey, utxo := range snapshot {
+		// Only verify UTXOs that could have been spent in the scanned range.
+		// A UTXO created after scanEnd cannot be spent in this range.
+		// Start checking from the block AFTER the UTXO was created.
+		checkFrom := utxo.Height + 1
+		if checkFrom < scanStart {
+			checkFrom = scanStart
+		}
+		if checkFrom > scanEnd {
+			continue
+		}
+
+		// Build the pkScript for this UTXO's address.
+		addr, err := btcutil.DecodeAddress(utxo.Address, r.chainParams)
+		if err != nil {
+			r.logger.Debugf("Spend verify: skip %s, bad address %s: %v",
+				utxoKey, utxo.Address, err)
+			continue
+		}
+		pkScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			r.logger.Debugf("Spend verify: skip %s, script error: %v",
+				utxoKey, err)
+			continue
+		}
+
+		// Parse the UTXO txid for outpoint comparison.
+		targetHash, err := chainhash.NewHashFromStr(utxo.TxID)
+		if err != nil {
+			r.logger.Debugf("Spend verify: skip %s, bad txid: %v",
+				utxoKey, err)
+			continue
+		}
+
+		spent := false
+		for height := checkFrom; height <= scanEnd && !spent; height++ {
+			blockHash, err := r.chainService.GetBlockHash(int64(height))
+			if err != nil {
+				continue
+			}
+
+			filter, err := r.chainService.GetCFilter(*blockHash, wire.GCSFilterRegular)
+			if err != nil || filter == nil {
+				continue
+			}
+
+			key := builder.DeriveKey(blockHash)
+			matched, err := filter.Match(key, pkScript)
+			if err != nil || !matched {
+				continue
+			}
+
+			// Filter matched for this single script — fetch full block.
+			block, err := r.chainService.GetBlock(*blockHash)
+			if err != nil {
+				r.logger.Debugf("Spend verify: failed to get block %d: %v", height, err)
+				continue
+			}
+
+			for _, tx := range block.Transactions() {
+				for _, txIn := range tx.MsgTx().TxIn {
+					prevOut := txIn.PreviousOutPoint
+					if prevOut.Hash.IsEqual(targetHash) && prevOut.Index == utxo.Vout {
+						spent = true
+						r.logger.Infof("Spend verify: %s spent at height %d in tx %s",
+							utxoKey, height, tx.Hash().String())
+						break
+					}
+				}
+				if spent {
+					break
+				}
+			}
+		}
+
+		if spent {
+			r.mu.Lock()
+			if _, exists := r.utxoSet[utxoKey]; exists {
+				delete(r.utxoSet, utxoKey)
+				removed++
+			}
+			r.mu.Unlock()
+		}
+	}
+
+	r.logger.Infof("Spend verification complete: checked %d UTXOs in %s, removed %d spent",
+		len(snapshot), time.Since(verifyStart).Round(time.Millisecond), removed)
+	return removed
 }
 
 // AddUTXO adds a UTXO to the set (for use by notification handlers).

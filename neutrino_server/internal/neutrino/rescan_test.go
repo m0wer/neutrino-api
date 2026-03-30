@@ -576,3 +576,58 @@ func TestRescanIncrementalSkip(t *testing.T) {
 		t.Errorf("expected LastStartHeight=243542, got %d", mgr.status.LastStartHeight)
 	}
 }
+
+// TestVerifyUTXOsUnspentEmptySnapshot tests that verifyUTXOsUnspent returns 0
+// when the snapshot is empty.
+func TestVerifyUTXOsUnspentEmptySnapshot(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	removed := mgr.verifyUTXOsUnspent(nil, 0, 100)
+	if removed != 0 {
+		t.Errorf("expected 0 removed for nil snapshot, got %d", removed)
+	}
+
+	removed = mgr.verifyUTXOsUnspent(map[string]UTXO{}, 0, 100)
+	if removed != 0 {
+		t.Errorf("expected 0 removed for empty snapshot, got %d", removed)
+	}
+}
+
+// TestVerifyUTXOsUnspentSkipsOutOfRange tests that UTXOs created after the scan
+// range are skipped (no chain service calls needed).
+func TestVerifyUTXOsUnspentSkipsOutOfRange(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		// nil chainService — if it tries to call it, we'll get a panic,
+		// proving the UTXO was NOT checked.
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	snapshot := map[string]UTXO{
+		"abc:0": {
+			TxID:    "abc",
+			Vout:    0,
+			Address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+			Height:  200, // created at 200, scanEnd=100 => out of range
+		},
+	}
+
+	// scanEnd < UTXO.Height, so the UTXO can't have been spent in this range.
+	removed := mgr.verifyUTXOsUnspent(snapshot, 0, 100)
+	if removed != 0 {
+		t.Errorf("expected 0 removed for out-of-range UTXO, got %d", removed)
+	}
+}
