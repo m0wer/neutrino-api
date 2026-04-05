@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Two-phase startup for faster initial sync with Tor setups**: Added `--clearnet-initial-sync` / `CLEARNET_INITIAL_SYNC` (default: `true`). When Tor is configured, the node now syncs block headers and filter headers over clearnet first, then restarts the chain service in Tor mode for privacy-sensitive operations.
+
+### Changed
+
+- **Compact filter prefetch is now opt-in**: `--prefetchfilters` / `PREFETCH_FILTERS` now defaults to `false` to avoid downloading and storing the full historical filter set on first startup.
+- **New prefetch lookback control**: Added `--prefetchlookback` / `PREFETCH_LOOKBACK` (default: `105120`, about 2 years). When prefetch is enabled and `prefetchstart=0`, the prefetch start height is auto-computed as `tip - lookback`.
+
 ### Fixed
 
 - **Spent UTXO detection in bulk endpoint**: `POST /v1/utxos` could return already-spent UTXOs because the batch `MatchAny` filter scan missed spending blocks in certain cases. Added a per-UTXO spend verification pass after the main scan that uses single-script `filter.Match` (the same approach used by the reliable `GET /v1/utxo/{txid}/{vout}` endpoint) to catch any spends missed by the batch scan.

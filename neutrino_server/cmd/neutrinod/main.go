@@ -35,9 +35,11 @@ func main() {
 	logLevel := flag.String("loglevel", getEnv("LOG_LEVEL", "info"), "Log level (trace, debug, info, warn, error)")
 	addPeers := flag.String("addpeer", getEnv("ADD_PEERS", ""), "Comma-separated list of peers to add while still allowing discovery")
 	torProxy := flag.String("torproxy", getEnv("TOR_PROXY", ""), "Tor SOCKS5 proxy address (e.g., 127.0.0.1:9050)")
-	prefetchFilters := flag.Bool("prefetchfilters", getEnvBool("PREFETCH_FILTERS", true), "Enable background compact filter prefetch")
+	prefetchFilters := flag.Bool("prefetchfilters", getEnvBool("PREFETCH_FILTERS", false), "Enable background compact filter prefetch (default: disabled to save storage)")
 	prefetchWorkers := flag.Int("prefetchworkers", getEnvInt("PREFETCH_WORKERS", 0), "Number of workers for background filter prefetch (0=auto)")
 	prefetchStart := flag.Int("prefetchstart", getEnvInt("PREFETCH_START", 0), "Start height for background filter prefetch")
+	prefetchLookback := flag.Int("prefetchlookback", getEnvInt("PREFETCH_LOOKBACK", 105120), "When >0 and prefetchstart=0, auto-compute prefetch start as tip minus this many blocks (~2 years default)")
+	clearnetInitialSync := flag.Bool("clearnet-initial-sync", getEnvBool("CLEARNET_INITIAL_SYNC", true), "Sync block headers over clearnet before switching to Tor (safe: headers are public data)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
 
@@ -58,6 +60,9 @@ func main() {
 	logger.Infof("Data directory: %s", *dataDir)
 	if *torProxy != "" {
 		logger.Infof("Tor proxy: %s", *torProxy)
+		if *clearnetInitialSync {
+			logger.Infof("Clearnet initial sync: enabled (headers are public data, safe over clearnet)")
+		}
 	}
 
 	// Ensure data directory exists
@@ -68,17 +73,19 @@ func main() {
 
 	// Create neutrino node
 	nodeConfig := &neutrino.Config{
-		Network:         *network,
-		DataDir:         *dataDir,
-		TorProxy:        *torProxy,
-		AddPeers:        *addPeers,
-		MaxPeers:        8,
-		FilterCacheSize: 100 * 1024 * 1024,
-		PrefetchFilters: *prefetchFilters,
-		PrefetchWorkers: *prefetchWorkers,
-		PrefetchStart:   int32(*prefetchStart),
-		Logger:          backend,
-		LogLevel:        *logLevel,
+		Network:             *network,
+		DataDir:             *dataDir,
+		TorProxy:            *torProxy,
+		AddPeers:            *addPeers,
+		MaxPeers:            8,
+		FilterCacheSize:     100 * 1024 * 1024,
+		PrefetchFilters:     *prefetchFilters,
+		PrefetchWorkers:     *prefetchWorkers,
+		PrefetchStart:       int32(*prefetchStart),
+		PrefetchLookback:    int32(*prefetchLookback),
+		ClearnetInitialSync: *clearnetInitialSync,
+		Logger:              backend,
+		LogLevel:            *logLevel,
 	}
 
 	node, err := neutrino.NewNode(nodeConfig)

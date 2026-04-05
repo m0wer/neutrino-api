@@ -32,18 +32,20 @@ import (
 
 // Config holds configuration for the neutrino node.
 type Config struct {
-	Network         string
-	DataDir         string
-	TorProxy        string
-	AddPeers        string
-	MaxPeers        int
-	BanDuration     time.Duration
-	FilterCacheSize int
-	PrefetchFilters bool
-	PrefetchWorkers int
-	PrefetchStart   int32
-	Logger          *btclog.Backend
-	LogLevel        string
+	Network             string
+	DataDir             string
+	TorProxy            string
+	AddPeers            string
+	MaxPeers            int
+	BanDuration         time.Duration
+	FilterCacheSize     int
+	PrefetchFilters     bool
+	PrefetchWorkers     int
+	PrefetchStart       int32
+	PrefetchLookback    int32 // >0: auto-compute start as tip-lookback when PrefetchStart==0
+	ClearnetInitialSync bool  // When true and TorProxy set, sync headers over clearnet first
+	Logger              *btclog.Backend
+	LogLevel            string
 }
 
 // Node wraps a neutrino ChainService with additional functionality.
@@ -133,6 +135,13 @@ func NewNode(config *Config) (*Node, error) {
 }
 
 // Start initializes and starts the neutrino node.
+// When ClearnetInitialSync is enabled and a TorProxy is configured, the node
+// performs a two-phase startup:
+//  1. Phase 1 (clearnet): Sync block headers and filter headers without Tor.
+//     This is safe because headers are deterministic public data identical for
+//     all nodes -- downloading them reveals nothing about watched addresses.
+//  2. Phase 2 (Tor): Stop the clearnet chain service and restart with Tor for
+//     all subsequent operations (filter fetches, block downloads, broadcasts).
 func (n *Node) Start() error {
 	n.logger.Info("Starting neutrino node...")
 
@@ -157,10 +166,79 @@ func (n *Node) Start() error {
 	neutrinoLogger.SetLevel(level)
 	neutrino.UseLogger(neutrinoLogger)
 
+	// Two-phase startup: clearnet headers sync, then switch to Tor
+	if n.config.ClearnetInitialSync && n.config.TorProxy != "" {
+		n.logger.Info("=== Phase 1: Syncing headers over clearnet (fast) ===")
+		n.logger.Info("Block headers and filter headers are public deterministic data,")
+		n.logger.Info("downloading them over clearnet does not reveal watched addresses.")
+
+		if err := n.startChainService(false); err != nil {
+			n.db.Close()
+			return fmt.Errorf("clearnet sync failed: %w", err)
+		}
+
+		// Wait for header sync to complete
+		n.logger.Info("Waiting for block header and filter header sync to complete...")
+		if err := n.waitForHeaderSync(); err != nil {
+			// Non-fatal: fall through to Tor startup with partial headers
+			n.logger.Warnf("Clearnet header sync did not complete: %v", err)
+			n.logger.Info("Proceeding to Tor mode with partial headers (will catch up via Tor)")
+		} else {
+			n.logger.Info("Header sync complete over clearnet")
+		}
+
+		// Stop the clearnet chain service (DB stays open)
+		n.logger.Info("=== Phase 2: Switching to Tor for privacy-sensitive operations ===")
+		if err := n.chainService.Stop(); err != nil {
+			n.logger.Warnf("Failed to stop clearnet chain service: %v", err)
+		}
+		n.chainService = nil
+
+		// Start with Tor
+		if err := n.startChainService(true); err != nil {
+			n.db.Close()
+			return fmt.Errorf("Tor chain service start failed: %w", err)
+		}
+		n.logger.Info("Chain service restarted with Tor proxy")
+	} else {
+		// Single-phase startup (no Tor, or clearnet-initial-sync disabled)
+		useTor := n.config.TorProxy != ""
+		if err := n.startChainService(useTor); err != nil {
+			n.db.Close()
+			return err
+		}
+	}
+
+	// Open rescan state store for persistence
+	stateStore, err := OpenStateStore(n.config.DataDir, n.logger)
+	if err != nil {
+		n.logger.Warnf("Failed to open rescan state store (persistence disabled): %v", err)
+		// Non-fatal: fall back to in-memory only mode.
+		stateStore = nil
+	}
+
+	// Create rescan manager with persistence
+	n.rescanMgr = NewRescanManager(n.chainService, n.logger, stateStore)
+
+	// Start sync monitoring goroutine
+	go n.monitorSync()
+
+	if n.config.PrefetchFilters {
+		go n.prefetchFilters()
+	}
+
+	n.logger.Info("Neutrino node started")
+	return nil
+}
+
+// startChainService creates and starts a neutrino.ChainService.
+// When useTor is true, all connections are routed through the configured Tor
+// SOCKS5 proxy. The method reuses the already-open n.db database.
+func (n *Node) startChainService(useTor bool) error {
 	// Create neutrino config
 	neutrinoConfig := neutrino.Config{
 		DataDir:         n.config.DataDir,
-		Database:        db,
+		Database:        n.db,
 		ChainParams:     *n.chainParams,
 		FilterCacheSize: uint64(n.config.FilterCacheSize),
 		PersistToDisk:   true,
@@ -186,34 +264,26 @@ func (n *Node) Start() error {
 		n.logger.Infof("Using %d DNS seeds for discovery", len(seeds))
 	}
 
-	// Configure Tor proxy if specified
-	if n.config.TorProxy != "" {
+	// Configure Tor proxy if requested
+	if useTor && n.config.TorProxy != "" {
 		n.logger.Infof("Configuring Tor SOCKS5 proxy: %s", n.config.TorProxy)
 
 		// Create a SOCKS5 dialer
 		torDialer, err := proxy.SOCKS5("tcp", n.config.TorProxy, nil, proxy.Direct)
 		if err != nil {
-			n.db.Close()
 			return fmt.Errorf("failed to create Tor SOCKS5 dialer: %w", err)
 		}
 
 		// Set up DNS resolution through Tor to prevent DNS leaks
-		// Use btcd's connmgr.TorLookupIP for actual DNS resolution via Tor
 		neutrinoConfig.NameResolver = func(host string) ([]net.IP, error) {
-			// If already an IP, return it directly
 			if ip := net.ParseIP(host); ip != nil {
 				return []net.IP{ip}, nil
 			}
 
-			// For .onion addresses, encode as IP bytes to preserve the hostname
-			// Note: This causes "unsupported IP type" warnings in neutrino's logs,
-			// but they're cosmetic and don't affect functionality. The connection works perfectly.
 			if strings.HasSuffix(host, ".onion") {
 				return []net.IP{net.IP([]byte(host))}, nil
 			}
 
-			// For regular DNS names, resolve through Tor
-			// This performs actual DNS resolution via Tor's SOCKS proxy
 			ips, err := connmgr.TorLookupIP(host, n.config.TorProxy)
 			if err != nil {
 				n.logger.Warnf("Tor DNS lookup failed for %s: %v", host, err)
@@ -227,27 +297,28 @@ func (n *Node) Start() error {
 		neutrinoConfig.Dialer = func(addr net.Addr) (net.Conn, error) {
 			targetAddr := addr.String()
 
-			// Check if this is an encoded .onion address (IP length > 16)
 			if tcpAddr, ok := addr.(*net.TCPAddr); ok && len(tcpAddr.IP) > 16 {
-				// Recover the original .onion hostname from the IP bytes
 				hostname := string(tcpAddr.IP)
 				targetAddr = net.JoinHostPort(hostname, fmt.Sprintf("%d", tcpAddr.Port))
 			}
 
-			// Dial through Tor - it will handle .onion addresses
-			// For regular IPs, they've already been resolved via TorLookupIP
 			return torDialer.Dial("tcp", targetAddr)
 		}
 
 		n.logger.Info("Tor proxy configured successfully (DNS resolution via Tor)")
+	} else if useTor {
+		n.logger.Warn("Tor requested but no proxy configured, using clearnet")
 	}
 
-	n.logger.Infof("Creating chain service for network: %s", n.chainParams.Name)
+	modeStr := "clearnet"
+	if useTor && n.config.TorProxy != "" {
+		modeStr = "Tor"
+	}
+	n.logger.Infof("Creating chain service for network %s (%s mode)", n.chainParams.Name, modeStr)
 
 	// Create chain service
 	chainService, err := neutrino.NewChainService(neutrinoConfig)
 	if err != nil {
-		n.db.Close()
 		return fmt.Errorf("failed to create chain service: %w", err)
 	}
 
@@ -257,31 +328,70 @@ func (n *Node) Start() error {
 	// Start the chain service
 	n.logger.Info("Starting chain service...")
 	if err := n.chainService.Start(); err != nil {
-		n.db.Close()
 		return fmt.Errorf("failed to start chain service: %w", err)
 	}
-	n.logger.Info("Chain service started successfully")
+	n.logger.Infof("Chain service started successfully (%s)", modeStr)
 
-	// Open rescan state store for persistence
-	stateStore, err := OpenStateStore(n.config.DataDir, n.logger)
-	if err != nil {
-		n.logger.Warnf("Failed to open rescan state store (persistence disabled): %v", err)
-		// Non-fatal: fall back to in-memory only mode.
-		stateStore = nil
-	}
-
-	// Create rescan manager with persistence
-	n.rescanMgr = NewRescanManager(n.chainService, n.logger, stateStore)
-
-	// Start sync monitoring goroutine
-	go n.monitorSync()
-
-	if n.config.PrefetchFilters {
-		go n.prefetchFilters()
-	}
-
-	n.logger.Info("Neutrino node started")
 	return nil
+}
+
+// waitForHeaderSync blocks until the chain service reports IsCurrent() or a
+// timeout is reached. Uses a generous timeout since mainnet header sync over
+// clearnet typically takes 2-10 minutes.
+func (n *Node) waitForHeaderSync() error {
+	const (
+		timeout      = 30 * time.Minute
+		pollInterval = 5 * time.Second
+		logInterval  = 30 * time.Second
+	)
+
+	start := time.Now()
+	lastLog := start
+	lastHeight := int32(-1)
+
+	for {
+		if n.chainService == nil {
+			return errors.New("chain service is nil")
+		}
+
+		if n.chainService.IsCurrent() {
+			bestBlock, err := n.chainService.BestBlock()
+			if err == nil {
+				elapsed := time.Since(start)
+				n.logger.Infof("Header sync complete: height %d in %s", bestBlock.Height, elapsed.Round(time.Second))
+			}
+			return nil
+		}
+
+		// Log progress
+		now := time.Now()
+		if now.Sub(lastLog) >= logInterval {
+			bestBlock, _ := n.chainService.BestBlock()
+			height := int32(0)
+			if bestBlock != nil {
+				height = bestBlock.Height
+			}
+			peers := len(n.chainService.Peers())
+			elapsed := now.Sub(start)
+
+			if height > lastHeight && lastHeight >= 0 {
+				blocksPerSec := float64(height-lastHeight) / logInterval.Seconds()
+				n.logger.Infof("Header sync: height %d, peers %d, %.0f headers/sec (%s elapsed)",
+					height, peers, blocksPerSec, elapsed.Round(time.Second))
+			} else {
+				n.logger.Infof("Header sync: height %d, peers %d (%s elapsed)",
+					height, peers, elapsed.Round(time.Second))
+			}
+			lastHeight = height
+			lastLog = now
+		}
+
+		if time.Since(start) >= timeout {
+			return fmt.Errorf("header sync did not complete within %s", timeout)
+		}
+
+		time.Sleep(pollInterval)
+	}
 }
 
 // Stop gracefully stops the neutrino node.
@@ -677,7 +787,8 @@ func (n *Node) prefetchFilters() {
 	defer close(n.prefetchDone)
 
 	workers := computePrefetchWorkerCount(n.config.PrefetchWorkers)
-	n.logger.Infof("Background filter prefetch enabled: workers=%d, start_height=%d", workers, n.config.PrefetchStart)
+	n.logger.Infof("Background filter prefetch enabled: workers=%d, start_height=%d, lookback=%d",
+		workers, n.config.PrefetchStart, n.config.PrefetchLookback)
 
 	for {
 		select {
@@ -701,6 +812,20 @@ func (n *Node) prefetchFilters() {
 			}
 			continue
 		}
+
+		// Auto-compute prefetch start from lookback if not explicitly set.
+		// This runs once after initial sync when we know the chain tip.
+		n.prefetchMu.Lock()
+		if n.config.PrefetchStart == 0 && n.config.PrefetchLookback > 0 && n.prefetchLastHeight < 0 {
+			bestBlock, err := n.chainService.BestBlock()
+			if err == nil && bestBlock.Height > n.config.PrefetchLookback {
+				computedStart := bestBlock.Height - n.config.PrefetchLookback
+				n.prefetchLastHeight = computedStart - 1
+				n.logger.Infof("Prefetch: auto-computed start height %d (tip %d - lookback %d)",
+					computedStart, bestBlock.Height, n.config.PrefetchLookback)
+			}
+		}
+		n.prefetchMu.Unlock()
 
 		n.runPrefetchPass(workers)
 
