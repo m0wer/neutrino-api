@@ -197,7 +197,7 @@ func (n *Node) Start() error {
 		// Start with Tor
 		if err := n.startChainService(true); err != nil {
 			n.db.Close()
-			return fmt.Errorf("Tor chain service start failed: %w", err)
+			return fmt.Errorf("tor chain service start failed: %w", err)
 		}
 		n.logger.Info("Chain service restarted with Tor proxy")
 	} else {
