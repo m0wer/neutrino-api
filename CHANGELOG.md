@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-04-06
+
 ### Added
 
 - **Two-phase startup for faster initial sync with Tor setups**: Added `--clearnet-initial-sync` / `CLEARNET_INITIAL_SYNC` (default: `true`). When Tor is configured, the node now syncs block headers and filter headers over clearnet first, then restarts the chain service in Tor mode for privacy-sensitive operations.
@@ -194,7 +196,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RESTful JSON API
 - Configurable via CLI flags or environment variables
 
-[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/yourusername/neutrino-api/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/yourusername/neutrino-api/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/yourusername/neutrino-api/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/yourusername/neutrino-api/compare/v0.6.1...v0.7.0
