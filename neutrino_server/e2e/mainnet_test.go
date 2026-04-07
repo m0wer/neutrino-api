@@ -25,14 +25,18 @@ package e2e
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -41,15 +45,20 @@ import (
 
 const (
 	// Timeouts
-	syncTimeout      = 15 * time.Minute // Max time to wait for initial sync
-	syncPollInterval = 5 * time.Second
-	requestTimeout   = 30 * time.Second
-	startupTimeout   = 30 * time.Second
+	defaultSyncTimeout = 15 * time.Minute // Max time to wait for initial sync
+	syncPollInterval   = 5 * time.Second
+	requestTimeout     = 30 * time.Second
+	startupTimeout     = 30 * time.Second
 
 	// Minimum sync requirements
-	minBlockHeight = 100000 // Wait until at least this height before running tests
-	minPeers       = 1      // Need at least one peer
+	defaultMinBlockHeight = 100000 // Wait until at least this height before running tests
+	minPeers              = 1      // Need at least one peer
 )
+
+type e2eConfig struct {
+	SyncTimeout    time.Duration
+	MinBlockHeight int32
+}
 
 // Known mainnet data for verification
 var (
@@ -122,13 +131,15 @@ func TestMainnetE2E(t *testing.T) {
 		t.Skip("Skipping e2e test in short mode")
 	}
 
+	cfg := loadE2EConfig(t)
+
 	// Get a random available port
 	port, err := getFreePort()
 	if err != nil {
 		t.Fatalf("Failed to get free port: %v", err)
 	}
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port)
-	baseURL := "http://" + listenAddr
+	baseURL := "https://" + listenAddr
 	t.Logf("Using port %d for test server", port)
 
 	// Build the binary
@@ -170,24 +181,61 @@ func TestMainnetE2E(t *testing.T) {
 		}
 	}()
 
+	client, authToken, err := buildAuthenticatedClient(dataDir)
+	if err != nil {
+		t.Fatalf("Failed to create authenticated client: %v", err)
+	}
+
 	// Wait for server to be ready
-	if err := waitForServer(t, baseURL); err != nil {
+	if err := waitForServer(t, client, baseURL, authToken); err != nil {
 		t.Fatalf("Server failed to start: %v", err)
 	}
 
 	// Wait for initial sync
-	if err := waitForSync(t, baseURL); err != nil {
+	if err := waitForSync(t, client, baseURL, authToken, cfg); err != nil {
 		t.Fatalf("Sync failed: %v", err)
 	}
 
 	// Run the actual tests
-	t.Run("Status", func(t *testing.T) { testStatus(t, baseURL) })
-	t.Run("Peers", func(t *testing.T) { testPeers(t, baseURL) })
-	t.Run("GenesisBlock", func(t *testing.T) { testGenesisBlock(t, baseURL) })
-	t.Run("Block100000", func(t *testing.T) { testBlock100000(t, baseURL) })
-	t.Run("Block500000", func(t *testing.T) { testBlock500000(t, baseURL) })
-	t.Run("WatchAddress", func(t *testing.T) { testWatchAddress(t, baseURL) })
-	t.Run("UTXOs", func(t *testing.T) { testUTXOs(t, baseURL) })
+	t.Run("Status", func(t *testing.T) { testStatus(t, client, baseURL, authToken, cfg.MinBlockHeight) })
+	t.Run("Peers", func(t *testing.T) { testPeers(t, client, baseURL, authToken) })
+	t.Run("GenesisBlock", func(t *testing.T) { testGenesisBlock(t, client, baseURL, authToken) })
+	t.Run("Block100000", func(t *testing.T) { testBlock100000(t, client, baseURL, authToken) })
+	t.Run("Block500000", func(t *testing.T) { testBlock500000(t, client, baseURL, authToken) })
+	t.Run("WatchAddress", func(t *testing.T) { testWatchAddress(t, client, baseURL, authToken) })
+	t.Run("UTXOs", func(t *testing.T) { testUTXOs(t, client, baseURL, authToken) })
+}
+
+func loadE2EConfig(t *testing.T) e2eConfig {
+	t.Helper()
+
+	minBlockHeight := defaultMinBlockHeight
+	if raw := strings.TrimSpace(os.Getenv("MIN_BLOCK_HEIGHT")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			t.Fatalf("invalid MIN_BLOCK_HEIGHT %q: %v", raw, err)
+		}
+		if parsed < 0 || parsed > math.MaxInt32 {
+			t.Fatalf("MIN_BLOCK_HEIGHT out of range: %d", parsed)
+		}
+		minBlockHeight = parsed
+	}
+
+	syncTimeout := defaultSyncTimeout
+	if raw := strings.TrimSpace(os.Getenv("SYNC_TIMEOUT")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			t.Fatalf("invalid SYNC_TIMEOUT %q: %v", raw, err)
+		}
+		if parsed <= 0 {
+			t.Fatalf("SYNC_TIMEOUT must be > 0, got %s", raw)
+		}
+		syncTimeout = parsed
+	}
+
+	cfg := e2eConfig{SyncTimeout: syncTimeout, MinBlockHeight: int32(minBlockHeight)}
+	t.Logf("E2E config: MIN_BLOCK_HEIGHT=%d, SYNC_TIMEOUT=%s", cfg.MinBlockHeight, cfg.SyncTimeout)
+	return cfg
 }
 
 // buildBinary builds the neutrinod binary for testing
@@ -274,16 +322,22 @@ func (w *testLogWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// waitForServer waits for the HTTP server to be ready
-func waitForServer(t *testing.T, baseURL string) error {
+// waitForServer waits for the HTTPS server to be ready.
+func waitForServer(t *testing.T, client *http.Client, baseURL, authToken string) error {
 	t.Helper()
 	t.Log("Waiting for server to be ready...")
 
 	deadline := time.Now().Add(startupTimeout)
-	client := &http.Client{Timeout: 2 * time.Second}
 
 	for time.Now().Before(deadline) {
-		resp, err := client.Get(baseURL + "/v1/status")
+		req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/status", nil)
+		if err != nil {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+authToken)
+
+		resp, err := client.Do(req)
 		if err == nil {
 			resp.Body.Close()
 			t.Log("Server is ready")
@@ -295,17 +349,61 @@ func waitForServer(t *testing.T, baseURL string) error {
 	return fmt.Errorf("server did not become ready within %v", startupTimeout)
 }
 
-// waitForSync waits for the node to sync to a minimum height
-func waitForSync(t *testing.T, baseURL string) error {
-	t.Helper()
-	t.Logf("Waiting for sync to height %d...", minBlockHeight)
+func buildAuthenticatedClient(dataDir string) (*http.Client, string, error) {
+	certPath := filepath.Join(dataDir, "tls.cert")
+	tokenPath := filepath.Join(dataDir, "auth_token")
 
-	deadline := time.Now().Add(syncTimeout)
-	client := &http.Client{Timeout: requestTimeout}
+	deadline := time.Now().Add(startupTimeout)
+	for time.Now().Before(deadline) {
+		certPEM, certErr := os.ReadFile(certPath)
+		tokenBytes, tokenErr := os.ReadFile(tokenPath)
+		if certErr == nil && tokenErr == nil {
+			token := strings.TrimSpace(string(tokenBytes))
+			if token == "" {
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(certPEM) {
+				return nil, "", fmt.Errorf("failed to parse TLS certificate at %s", certPath)
+			}
+
+			transport := &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+					RootCAs:    pool,
+				},
+			}
+
+			client := &http.Client{Timeout: requestTimeout, Transport: transport}
+			return client, token, nil
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	return nil, "", fmt.Errorf("timed out waiting for TLS cert and auth token in %s", dataDir)
+}
+
+// waitForSync waits for the node to sync to a minimum height
+func waitForSync(t *testing.T, client *http.Client, baseURL, authToken string, cfg e2eConfig) error {
+	t.Helper()
+	t.Logf("Waiting for sync to height %d...", cfg.MinBlockHeight)
+
+	deadline := time.Now().Add(cfg.SyncTimeout)
 	lastHeight := int32(0)
 
 	for time.Now().Before(deadline) {
-		resp, err := client.Get(baseURL + "/v1/status")
+		req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/status", nil)
+		if err != nil {
+			t.Logf("Failed to build status request: %v", err)
+			time.Sleep(syncPollInterval)
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+authToken)
+
+		resp, err := client.Do(req)
 		if err != nil {
 			t.Logf("Status request failed: %v", err)
 			time.Sleep(syncPollInterval)
@@ -329,7 +427,7 @@ func waitForSync(t *testing.T, baseURL string) error {
 		}
 
 		// Check if we have enough sync progress
-		if status.BlockHeight >= minBlockHeight && status.Peers >= minPeers {
+		if status.BlockHeight >= cfg.MinBlockHeight && status.Peers >= minPeers {
 			t.Logf("Sync complete: height=%d, peers=%d", status.BlockHeight, status.Peers)
 			return nil
 		}
@@ -337,16 +435,20 @@ func waitForSync(t *testing.T, baseURL string) error {
 		time.Sleep(syncPollInterval)
 	}
 
-	return fmt.Errorf("sync did not complete within %v (last height: %d)", syncTimeout, lastHeight)
+	return fmt.Errorf("sync did not complete within %v (last height: %d)", cfg.SyncTimeout, lastHeight)
 }
 
 // HTTP helpers
 
-func getJSON(t *testing.T, baseURL, path string, result any) error {
+func getJSON(t *testing.T, client *http.Client, baseURL, path, authToken string, result any) error {
 	t.Helper()
-	client := &http.Client{Timeout: requestTimeout}
+	req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+authToken)
 
-	resp, err := client.Get(baseURL + path)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -364,11 +466,16 @@ func getJSON(t *testing.T, baseURL, path string, result any) error {
 	return nil
 }
 
-func postJSON(t *testing.T, baseURL, path string, body string, result any) error {
+func postJSON(t *testing.T, client *http.Client, baseURL, path, authToken string, body string, result any) error {
 	t.Helper()
-	client := &http.Client{Timeout: requestTimeout}
+	req, err := http.NewRequest(http.MethodPost, baseURL+path, strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+authToken)
+	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := client.Post(baseURL+path, "application/json", strings.NewReader(body))
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -388,9 +495,9 @@ func postJSON(t *testing.T, baseURL, path string, body string, result any) error
 
 // Individual test cases
 
-func testStatus(t *testing.T, baseURL string) {
+func testStatus(t *testing.T, client *http.Client, baseURL, authToken string, minBlockHeight int32) {
 	var status StatusResponse
-	if err := getJSON(t, baseURL, "/v1/status", &status); err != nil {
+	if err := getJSON(t, client, baseURL, "/v1/status", authToken, &status); err != nil {
 		t.Fatalf("Failed to get status: %v", err)
 	}
 
@@ -406,9 +513,9 @@ func testStatus(t *testing.T, baseURL string) {
 	}
 }
 
-func testPeers(t *testing.T, baseURL string) {
+func testPeers(t *testing.T, client *http.Client, baseURL, authToken string) {
 	var peers PeersResponse
-	if err := getJSON(t, baseURL, "/v1/peers", &peers); err != nil {
+	if err := getJSON(t, client, baseURL, "/v1/peers", authToken, &peers); err != nil {
 		t.Fatalf("Failed to get peers: %v", err)
 	}
 
@@ -419,9 +526,9 @@ func testPeers(t *testing.T, baseURL string) {
 	}
 }
 
-func testGenesisBlock(t *testing.T, baseURL string) {
+func testGenesisBlock(t *testing.T, client *http.Client, baseURL, authToken string) {
 	var header BlockHeaderResponse
-	if err := getJSON(t, baseURL, "/v1/block/0/header", &header); err != nil {
+	if err := getJSON(t, client, baseURL, "/v1/block/0/header", authToken, &header); err != nil {
 		t.Fatalf("Failed to get genesis block header: %v", err)
 	}
 
@@ -449,9 +556,9 @@ func testGenesisBlock(t *testing.T, baseURL string) {
 	}
 }
 
-func testBlock100000(t *testing.T, baseURL string) {
+func testBlock100000(t *testing.T, client *http.Client, baseURL, authToken string) {
 	var header BlockHeaderResponse
-	if err := getJSON(t, baseURL, "/v1/block/100000/header", &header); err != nil {
+	if err := getJSON(t, client, baseURL, "/v1/block/100000/header", authToken, &header); err != nil {
 		t.Fatalf("Failed to get block 100000 header: %v", err)
 	}
 
@@ -468,10 +575,10 @@ func testBlock100000(t *testing.T, baseURL string) {
 	}
 }
 
-func testBlock500000(t *testing.T, baseURL string) {
+func testBlock500000(t *testing.T, client *http.Client, baseURL, authToken string) {
 	// First check if we're synced high enough
 	var status StatusResponse
-	if err := getJSON(t, baseURL, "/v1/status", &status); err != nil {
+	if err := getJSON(t, client, baseURL, "/v1/status", authToken, &status); err != nil {
 		t.Fatalf("Failed to get status: %v", err)
 	}
 
@@ -480,7 +587,7 @@ func testBlock500000(t *testing.T, baseURL string) {
 	}
 
 	var header BlockHeaderResponse
-	if err := getJSON(t, baseURL, "/v1/block/500000/header", &header); err != nil {
+	if err := getJSON(t, client, baseURL, "/v1/block/500000/header", authToken, &header); err != nil {
 		t.Fatalf("Failed to get block 500000 header: %v", err)
 	}
 
@@ -497,11 +604,11 @@ func testBlock500000(t *testing.T, baseURL string) {
 	}
 }
 
-func testWatchAddress(t *testing.T, baseURL string) {
+func testWatchAddress(t *testing.T, client *http.Client, baseURL, authToken string) {
 	// Watch Satoshi's address
 	body := fmt.Sprintf(`{"address": "%s"}`, satoshiAddress)
 	var resp WatchResponse
-	if err := postJSON(t, baseURL, "/v1/watch/address", body, &resp); err != nil {
+	if err := postJSON(t, client, baseURL, "/v1/watch/address", authToken, body, &resp); err != nil {
 		t.Fatalf("Failed to watch address: %v", err)
 	}
 
@@ -512,13 +619,13 @@ func testWatchAddress(t *testing.T, baseURL string) {
 	}
 }
 
-func testUTXOs(t *testing.T, baseURL string) {
+func testUTXOs(t *testing.T, client *http.Client, baseURL, authToken string) {
 	// Query UTXOs for known addresses
 	// Note: Since we haven't done a full rescan, this may return empty
 	// but the endpoint should work without errors
 	body := fmt.Sprintf(`{"addresses": ["%s", "%s"]}`, satoshiAddress, halFinneyAddress)
 	var resp UTXOsResponse
-	if err := postJSON(t, baseURL, "/v1/utxos", body, &resp); err != nil {
+	if err := postJSON(t, client, baseURL, "/v1/utxos", authToken, body, &resp); err != nil {
 		t.Fatalf("Failed to get UTXOs: %v", err)
 	}
 
