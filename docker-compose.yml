@@ -50,6 +50,7 @@ services:
       - LOG_LEVEL=debug
       - ADD_PEERS=bitcoin:18444
       - MAX_PEERS=8
+      - NO_AUTH=true
     ports:
       - "8334:8334"
     volumes:

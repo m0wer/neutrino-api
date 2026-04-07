@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/yourusername/neutrino-api/neutrino_server/internal/api"
+	"github.com/yourusername/neutrino-api/neutrino_server/internal/auth"
 	"github.com/yourusername/neutrino-api/neutrino_server/internal/neutrino"
 )
 
@@ -40,6 +42,8 @@ func main() {
 	prefetchStart := flag.Int("prefetchstart", getEnvInt("PREFETCH_START", 0), "Start height for background filter prefetch")
 	prefetchLookback := flag.Int("prefetchlookback", getEnvInt("PREFETCH_LOOKBACK", 105120), "When >0 and prefetchstart=0, auto-compute prefetch start as tip minus this many blocks (~2 years default)")
 	clearnetInitialSync := flag.Bool("clearnet-initial-sync", getEnvBool("CLEARNET_INITIAL_SYNC", true), "Sync block headers over clearnet before switching to Tor (safe: headers are public data)")
+	noAuth := flag.Bool("no-auth", getEnvBool("NO_AUTH", false), "Disable TLS and token authentication (for development/regtest)")
+	resetAuth := flag.Bool("reset-auth", false, "Regenerate TLS cert and auth token, clear watched addresses, then exit")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
 
@@ -69,6 +73,40 @@ func main() {
 	if err := os.MkdirAll(*dataDir, 0750); err != nil {
 		logger.Errorf("Failed to create data directory: %v", err)
 		os.Exit(1)
+	}
+
+	// Handle --reset-auth: regenerate credentials, clear privacy data, exit.
+	if *resetAuth {
+		if err := handleResetAuth(*dataDir, logger); err != nil {
+			logger.Errorf("Reset auth failed: %v", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// Set up TLS and auth token (unless --no-auth).
+	var tlsCfg *tls.Config
+	var authToken string
+
+	if !*noAuth {
+		tlsConfig, err := auth.LoadOrGenerateTLS(*dataDir, logger)
+		if err != nil {
+			logger.Errorf("Failed to set up TLS: %v", err)
+			os.Exit(1)
+		}
+		tlsCfg = tlsConfig.Config
+		logger.Infof("TLS certificate: %s", tlsConfig.CertPath)
+
+		authLogger := backend.Logger("AUTH")
+		authLogger.SetLevel(level)
+		authToken, err = auth.LoadOrGenerateToken(*dataDir, authLogger)
+		if err != nil {
+			logger.Errorf("Failed to set up auth token: %v", err)
+			os.Exit(1)
+		}
+		logger.Infof("Auth token loaded (clients must present Bearer token)")
+	} else {
+		logger.Warnf("Authentication disabled (--no-auth). API is unprotected!")
 	}
 
 	// Create neutrino node
@@ -108,9 +146,17 @@ func main() {
 
 	// Set up router
 	router := mux.NewRouter()
+
+	// Register auth middleware before API routes (if enabled).
+	if authToken != "" {
+		authLogger := backend.Logger("AUTH")
+		authLogger.SetLevel(level)
+		router.Use(auth.Middleware(authToken, authLogger))
+	}
+
 	handler.RegisterRoutes(router)
 
-	// Create HTTP server
+	// Create HTTP(S) server
 	server := &http.Server{
 		Addr:         *listen,
 		Handler:      router,
@@ -119,11 +165,22 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start HTTP server in background
+	if tlsCfg != nil {
+		server.TLSConfig = tlsCfg
+	}
+
+	// Start server in background
 	go func() {
-		logger.Infof("HTTP server listening on %s", *listen)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Errorf("HTTP server error: %v", err)
+		if tlsCfg != nil {
+			logger.Infof("HTTPS server listening on %s (TLS enabled)", *listen)
+			if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				logger.Errorf("HTTPS server error: %v", err)
+			}
+		} else {
+			logger.Infof("HTTP server listening on %s", *listen)
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Errorf("HTTP server error: %v", err)
+			}
 		}
 	}()
 
@@ -147,6 +204,49 @@ func main() {
 	}
 
 	logger.Info("Shutdown complete")
+}
+
+// handleResetAuth regenerates TLS credentials and auth token, clears
+// privacy-sensitive data (watched addresses, UTXOs), and prints the
+// new auth token to stdout.
+func handleResetAuth(dataDir string, logger btclog.Logger) error {
+	logger.Info("Resetting auth credentials...")
+
+	// Remove existing TLS files so they get regenerated.
+	for _, name := range []string{auth.TLSCertFilename, auth.TLSKeyFilename, auth.TokenFilename} {
+		path := fmt.Sprintf("%s/%s", dataDir, name)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		}
+	}
+
+	// Generate fresh TLS cert and auth token.
+	if _, err := auth.LoadOrGenerateTLS(dataDir, logger); err != nil {
+		return fmt.Errorf("failed to generate TLS: %w", err)
+	}
+	token, err := auth.LoadOrGenerateToken(dataDir, logger)
+	if err != nil {
+		return fmt.Errorf("failed to generate token: %w", err)
+	}
+
+	// Clear watched addresses and UTXOs from the state database.
+	storeLogger := logger // reuse same logger for brevity
+	store, err := neutrino.OpenStateStore(dataDir, storeLogger)
+	if err != nil {
+		logger.Warnf("Could not open state store to clear privacy data: %v", err)
+	} else {
+		if err := store.ClearPrivacyData(); err != nil {
+			logger.Warnf("Failed to clear privacy data: %v", err)
+		} else {
+			logger.Info("Cleared watched addresses and UTXO set")
+		}
+		store.Close()
+	}
+
+	logger.Info("Auth reset complete")
+	fmt.Printf("New auth token: %s\n", token)
+	fmt.Printf("TLS certificate: %s/%s\n", dataDir, auth.TLSCertFilename)
+	return nil
 }
 
 // getEnv returns the value of an environment variable or a default value.

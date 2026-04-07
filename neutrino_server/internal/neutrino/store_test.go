@@ -293,6 +293,81 @@ func TestStateStorePersistenceAcrossReopen(t *testing.T) {
 	}
 }
 
+func TestClearPrivacyData(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+
+	// Populate all three buckets with data.
+	if err := store.SaveWatchedAddr("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"); err != nil {
+		t.Fatalf("SaveWatchedAddr() error: %v", err)
+	}
+	if err := store.SaveWatchedAddr("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"); err != nil {
+		t.Fatalf("SaveWatchedAddr() error: %v", err)
+	}
+	utxos := map[string]UTXO{
+		"tx1:0": {TxID: "tx1", Vout: 0, Value: 50000000, Address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", Height: 100},
+	}
+	if err := store.SaveUTXOSet(utxos); err != nil {
+		t.Fatalf("SaveUTXOSet() error: %v", err)
+	}
+	if err := store.SaveRescanMeta(296102, 243542); err != nil {
+		t.Fatalf("SaveRescanMeta() error: %v", err)
+	}
+
+	// Verify data is present before clearing.
+	addrs, _ := store.LoadWatchedAddrs()
+	if len(addrs) != 2 {
+		t.Fatalf("expected 2 addresses before clear, got %d", len(addrs))
+	}
+	loadedUTXOs, _ := store.LoadUTXOSet()
+	if len(loadedUTXOs) != 1 {
+		t.Fatalf("expected 1 UTXO before clear, got %d", len(loadedUTXOs))
+	}
+	tip, start, _ := store.LoadRescanMeta()
+	if tip != 296102 || start != 243542 {
+		t.Fatalf("expected metadata (296102, 243542) before clear, got (%d, %d)", tip, start)
+	}
+
+	// Clear privacy data.
+	if err := store.ClearPrivacyData(); err != nil {
+		t.Fatalf("ClearPrivacyData() error: %v", err)
+	}
+
+	// Verify all buckets are empty after clearing.
+	addrs, err := store.LoadWatchedAddrs()
+	if err != nil {
+		t.Fatalf("LoadWatchedAddrs() after clear error: %v", err)
+	}
+	if len(addrs) != 0 {
+		t.Errorf("expected 0 addresses after clear, got %d", len(addrs))
+	}
+
+	loadedUTXOs, err = store.LoadUTXOSet()
+	if err != nil {
+		t.Fatalf("LoadUTXOSet() after clear error: %v", err)
+	}
+	if len(loadedUTXOs) != 0 {
+		t.Errorf("expected 0 UTXOs after clear, got %d", len(loadedUTXOs))
+	}
+
+	tip, start, err = store.LoadRescanMeta()
+	if err != nil {
+		t.Fatalf("LoadRescanMeta() after clear error: %v", err)
+	}
+	if tip != 0 || start != 0 {
+		t.Errorf("expected metadata (0, 0) after clear, got (%d, %d)", tip, start)
+	}
+
+	// Verify store is still usable after clearing (buckets were recreated).
+	if err := store.SaveWatchedAddr("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"); err != nil {
+		t.Fatalf("SaveWatchedAddr() after clear error: %v", err)
+	}
+	addrs, _ = store.LoadWatchedAddrs()
+	if len(addrs) != 1 {
+		t.Errorf("expected 1 address after re-adding, got %d", len(addrs))
+	}
+}
+
 func TestStateStoreCloseNil(t *testing.T) {
 	// Closing a store with nil db should not panic.
 	s := &StateStore{db: nil, logger: btclog.NewBackend(os.Stdout).Logger("TEST")}

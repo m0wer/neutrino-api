@@ -169,6 +169,25 @@ func (s *StateStore) SaveRescanMeta(lastScannedTip, lastStartHeight int32) error
 	})
 }
 
+// ClearPrivacyData removes watched addresses, UTXOs, and rescan metadata
+// while leaving the underlying database intact (block headers and compact
+// filters live in a separate neutrino.db file and are not affected).
+// This is used by --reset-auth to ensure a fresh start without leaking
+// previously watched address information to a new client.
+func (s *StateStore) ClearPrivacyData() error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		for _, bucket := range [][]byte{bucketWatchedAddrs, bucketUTXOSet, bucketRescanMeta} {
+			if err := tx.DeleteBucket(bucket); err != nil {
+				return fmt.Errorf("failed to delete bucket %s: %w", string(bucket), err)
+			}
+			if _, err := tx.CreateBucket(bucket); err != nil {
+				return fmt.Errorf("failed to recreate bucket %s: %w", string(bucket), err)
+			}
+		}
+		return nil
+	})
+}
+
 // LoadRescanMeta returns the last scanned tip and start height.
 // Returns (0, 0) if no metadata has been saved yet.
 func (s *StateStore) LoadRescanMeta() (lastScannedTip, lastStartHeight int32, err error) {
