@@ -9,10 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Auto-TLS and API token authentication**: The server now generates a self-signed TLS certificate (EC P-256) and a random API token on first start, protecting against eavesdropping and unauthorized access. Credentials are persisted in the data directory.
+- Add `--no-auth` / `NO_AUTH=true` flag to disable TLS and token authentication (for development/regtest environments).
+- Add `--reset-auth` flag to regenerate TLS certificate and auth token, and clear privacy-sensitive data (watched addresses, UTXOs).
 - Add `GET /v1/version` endpoint returning `{"version": "..."}` for lightweight version diagnostics.
 - Include `version` and `watched_addresses` fields in `GET /v1/status` responses.
 - Include `watched_addresses` and `server_version` in `GET /v1/rescan/status` responses.
 - Add `X-Neutrino-Version` response header on JSON API responses.
+- **Docker image major-version tags** (e.g., `ghcr.io/m0wer/neutrino-api:1`): Users can pin to a major version for automatic minor/patch updates without breaking changes.
+
+### Changed
+
+- **BREAKING: Server now uses HTTPS and requires authentication by default.** Previously the server listened on plain HTTP with no authentication. It now auto-generates a TLS certificate and auth token, and requires `Authorization: Bearer <token>` on all requests. See the migration guide below.
+
+### Migration guide (upgrading to this version)
+
+Existing deployments that relied on unauthenticated plain HTTP access will break after upgrading. Choose one of the following approaches:
+
+1. **Adopt TLS + auth (recommended for production):** After starting the upgraded server, find the auto-generated auth token in `<datadir>/auth_token`. Update your clients to use HTTPS and include the `Authorization: Bearer <token>` header. If using self-signed TLS, configure your client to trust `<datadir>/tls.cert`.
+
+2. **Disable auth (development/regtest only):** Set `NO_AUTH=true` (environment variable) or pass `--no-auth` to restore the previous unauthenticated HTTP behavior. This is already set in the provided `docker-compose.yml` for the regtest environment.
+
+3. **Pin your Docker image to a major version tag** to avoid future breaking changes from automatic pulls. Use `ghcr.io/m0wer/neutrino-api:0` for the pre-auth behavior or `ghcr.io/m0wer/neutrino-api:1` once v1.0.0 is released.
 
 ## [0.10.0] - 2026-04-06
 

@@ -27,23 +27,26 @@ curl -s http://localhost:8334/v1/status | jq
 
 ### Using Docker
 
+Pin to a major version tag (e.g., `:1`) for automatic updates without breaking changes:
+
 ```bash
-# Run for mainnet
+# Run for mainnet (TLS + auth enabled by default)
 docker run -d \
   -p 8334:8334 \
   -v neutrino-data:/data/neutrino \
   -e NETWORK=mainnet \
   -e LOG_LEVEL=info \
-  ghcr.io/m0wer/neutrino-api
+  ghcr.io/m0wer/neutrino-api:1
 
-# Run for regtest with custom Bitcoin node
+# Run for regtest with auth disabled
 docker run -d \
   -p 8334:8334 \
   -v neutrino-data:/data/neutrino \
   -e NETWORK=regtest \
   -e ADD_PEERS=bitcoin-node:18444 \
   -e LOG_LEVEL=debug \
-  ghcr.io/m0wer/neutrino-api
+  -e NO_AUTH=true \
+  ghcr.io/m0wer/neutrino-api:1
 ```
 
 ### Building from Source
@@ -95,6 +98,7 @@ Anyone can reproduce and verify a release locally with one command:
 | `ADD_PEERS` | | Comma-separated list of preferred peers (e.g., `node1:8333,node2:8333`) while still allowing peer discovery |
 | `TOR_PROXY` | | Tor SOCKS5 proxy address (e.g., `127.0.0.1:9050`) |
 | `MAX_PEERS` | `8` | Maximum number of peers to connect to |
+| `NO_AUTH` | `false` | Disable TLS and token authentication (for development/regtest) |
 
 ### Command Line Flags
 
@@ -106,7 +110,9 @@ Anyone can reproduce and verify a release locally with one command:
   --loglevel=info \
   --addpeer=peer1:8333,peer2:8333 \
   --torproxy=127.0.0.1:9050 \
-  --maxpeers=8
+  --maxpeers=8 \
+  --no-auth        # Disable TLS + auth (dev/regtest only)
+  # --reset-auth   # Regenerate TLS cert and auth token, then exit
 ```
 
 ## Using with Tor
@@ -125,7 +131,7 @@ services:
       - "9050:9050"
 
   neutrino:
-    image: ghcr.io/m0wer/neutrino-api
+    image: ghcr.io/m0wer/neutrino-api:1
     container_name: neutrino
     restart: unless-stopped
     environment:
@@ -162,7 +168,7 @@ docker run -d \
   -e NETWORK=mainnet \
   -e TOR_PROXY=host.docker.internal:9050 \
   -e LOG_LEVEL=info \
-  ghcr.io/m0wer/neutrino-api
+  ghcr.io/m0wer/neutrino-api:1
 ```
 
 **Note:** When running Tor and neutrino in separate containers, use `host.docker.internal:9050` (on macOS/Windows) or `--network host` (on Linux) to access the Tor proxy.
@@ -394,7 +400,7 @@ docker build -t neutrino-api:latest ./neutrino_server
 ```yaml
 services:
   neutrino:
-    image: ghcr.io/m0wer/neutrino-api
+    image: ghcr.io/m0wer/neutrino-api:1
     container_name: neutrino
     restart: unless-stopped
     environment:
@@ -407,21 +413,21 @@ services:
       - "8334:8334"
     volumes:
       - neutrino-data:/data/neutrino
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8334/v1/status"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
 volumes:
   neutrino-data:
 ```
 
+**Note:** TLS and API token authentication are enabled by default. After first start, find the auth token in the data volume at `auth_token` and the TLS certificate at `tls.cert`. Clients must use HTTPS and include `Authorization: Bearer <token>`.
+
 ### Security Considerations
 
+- **TLS + auth enabled by default**: The server auto-generates a self-signed TLS certificate and API token on first start. Clients must use HTTPS and present the token via `Authorization: Bearer <token>`.
+- To retrieve the auth token from a Docker container: `docker exec neutrino cat /data/neutrino/auth_token`
+- To retrieve the TLS cert for client pinning: `docker cp neutrino:/data/neutrino/tls.cert ./tls.cert`
+- Set `NO_AUTH=true` only for development/regtest environments.
+- Use `--reset-auth` to rotate credentials and clear privacy data (watched addresses, UTXOs).
 - Run as non-root user (already configured in Dockerfile)
-- Use reverse proxy (nginx, Caddy) for TLS termination
-- Implement rate limiting for API endpoints
 - Monitor resource usage and set appropriate limits
 - Keep data directory backed up
 - Use firewall rules to restrict access
