@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-07
+
 ### Added
 
 - **Auto-TLS and API token authentication**: The server now generates a self-signed TLS certificate (EC P-256) and a random API token on first start, protecting against eavesdropping and unauthorized access. Credentials are persisted in the data directory.
@@ -221,15 +223,16 @@ Existing deployments that relied on unauthenticated plain HTTP access will break
 - RESTful JSON API
 - Configurable via CLI flags or environment variables
 
-[Unreleased]: https://github.com/yourusername/neutrino-api/compare/v0.10.0...HEAD
-[0.10.0]: https://github.com/yourusername/neutrino-api/compare/v0.9.0...v0.10.0
-[0.9.0]: https://github.com/yourusername/neutrino-api/compare/v0.8.0...v0.9.0
-[0.8.0]: https://github.com/yourusername/neutrino-api/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/yourusername/neutrino-api/compare/v0.6.1...v0.7.0
-[0.6.1]: https://github.com/yourusername/neutrino-api/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/yourusername/neutrino-api/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/yourusername/neutrino-api/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/yourusername/neutrino-api/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/yourusername/neutrino-api/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/yourusername/neutrino-api/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/yourusername/neutrino-api/releases/tag/v0.1.0
+[Unreleased]: https://github.com/m0wer/neutrino-api/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/m0wer/neutrino-api/compare/v0.10.0...v1.0.0
+[0.10.0]: https://github.com/m0wer/neutrino-api/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/m0wer/neutrino-api/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/m0wer/neutrino-api/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/m0wer/neutrino-api/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/m0wer/neutrino-api/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/m0wer/neutrino-api/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/m0wer/neutrino-api/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/m0wer/neutrino-api/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/m0wer/neutrino-api/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/m0wer/neutrino-api/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/m0wer/neutrino-api/releases/tag/v0.1.0
