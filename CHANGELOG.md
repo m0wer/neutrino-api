@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `GET /v1/version` endpoint returning `{"version": "..."}` for lightweight version diagnostics.
+- Include `version` and `watched_addresses` fields in `GET /v1/status` responses.
+- Include `watched_addresses` and `server_version` in `GET /v1/rescan/status` responses.
+- Add `X-Neutrino-Version` response header on JSON API responses.
+
 ## [0.10.0] - 2026-04-06
 
 ### Added

@@ -77,6 +77,7 @@ func main() {
 		DataDir:             *dataDir,
 		TorProxy:            *torProxy,
 		AddPeers:            *addPeers,
+		Version:             version,
 		MaxPeers:            8,
 		FilterCacheSize:     100 * 1024 * 1024,
 		PrefetchFilters:     *prefetchFilters,
@@ -103,7 +104,7 @@ func main() {
 	// Create API handler
 	apiLogger := backend.Logger("API")
 	apiLogger.SetLevel(level)
-	handler := api.NewHandler(node, apiLogger)
+	handler := api.NewHandler(node, apiLogger, version)
 
 	// Set up router
 	router := mux.NewRouter()

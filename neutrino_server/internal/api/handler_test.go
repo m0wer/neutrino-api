@@ -21,10 +21,12 @@ type mockNode struct{}
 
 func (m *mockNode) GetStatus() neutrino.Status {
 	return neutrino.Status{
-		Synced:       true,
-		BlockHeight:  8543,
-		FilterHeight: 8543,
-		Peers:        1,
+		Synced:           true,
+		BlockHeight:      8543,
+		FilterHeight:     8543,
+		Peers:            1,
+		Version:          testVersion,
+		WatchedAddresses: 3,
 	}
 }
 
@@ -78,11 +80,13 @@ func (m *mockNode) RescanStatus() neutrino.RescanStatus {
 	return neutrino.RescanStatus{}
 }
 
+const testVersion = "v0.10.1-test"
+
 func TestHandleGetStatus(t *testing.T) {
 	backend := btclog.NewBackend(os.Stdout)
 	logger := backend.Logger("TEST")
 
-	handler := NewHandler(&mockNode{}, logger)
+	handler := NewHandler(&mockNode{}, logger, testVersion)
 
 	router := mux.NewRouter()
 	router.HandleFunc("/v1/status", handler.handleGetStatus).Methods("GET")
@@ -118,6 +122,53 @@ func TestHandleGetStatus(t *testing.T) {
 
 	if response.Peers != 1 {
 		t.Errorf("expected peers=1, got %v", response.Peers)
+	}
+
+	if response.Version != testVersion {
+		t.Errorf("expected version=%s, got %v", testVersion, response.Version)
+	}
+
+	if response.WatchedAddresses != 3 {
+		t.Errorf("expected watched_addresses=3, got %v", response.WatchedAddresses)
+	}
+
+	if got := rr.Header().Get("X-Neutrino-Version"); got != testVersion {
+		t.Errorf("expected X-Neutrino-Version=%s, got %v", testVersion, got)
+	}
+}
+
+func TestHandleGetVersion(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	handler := NewHandler(&mockNode{}, logger, testVersion)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/version", handler.handleGetVersion).Methods("GET")
+
+	req, err := http.NewRequest("GET", "/v1/version", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("could not decode response: %v", err)
+	}
+
+	if response["version"] != testVersion {
+		t.Errorf("expected version=%s, got %v", testVersion, response["version"])
+	}
+
+	if got := rr.Header().Get("X-Neutrino-Version"); got != testVersion {
+		t.Errorf("expected X-Neutrino-Version=%s, got %v", testVersion, got)
 	}
 }
 
@@ -583,6 +634,12 @@ func TestHandleGetRescanStatus_NotInProgress(t *testing.T) {
 	}
 	if _, ok := response["last_scanned_tip"]; !ok {
 		t.Error("expected last_scanned_tip in response")
+	}
+	if watched, ok := response["watched_addresses"].(float64); !ok || int(watched) != 3 {
+		t.Errorf("expected watched_addresses=3, got %v", response["watched_addresses"])
+	}
+	if version, ok := response["server_version"].(string); !ok || version != testVersion {
+		t.Errorf("expected server_version=%s, got %v", testVersion, response["server_version"])
 	}
 }
 

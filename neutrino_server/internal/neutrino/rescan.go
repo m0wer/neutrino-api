@@ -199,6 +199,13 @@ func (r *RescanManager) IsRescanInProgress() bool {
 	return r.rescanInProgress.Load() > 0
 }
 
+// WatchedAddressCount returns the number of currently watched addresses.
+func (r *RescanManager) WatchedAddressCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.watchedAddrs)
+}
+
 // GetRescanStatus returns the current detailed rescan status.
 func (r *RescanManager) GetRescanStatus() RescanStatus {
 	r.statusMu.RLock()

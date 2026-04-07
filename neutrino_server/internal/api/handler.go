@@ -36,15 +36,22 @@ type NodeInterface interface {
 
 // Handler provides REST API endpoints for the neutrino node.
 type Handler struct {
-	node   NodeInterface
-	logger btclog.Logger
+	node    NodeInterface
+	logger  btclog.Logger
+	version string
 }
 
 // NewHandler creates a new API handler.
-func NewHandler(node NodeInterface, logger btclog.Logger) *Handler {
+func NewHandler(node NodeInterface, logger btclog.Logger, version ...string) *Handler {
+	resolvedVersion := ""
+	if len(version) > 0 {
+		resolvedVersion = version[0]
+	}
+
 	return &Handler{
-		node:   node,
-		logger: logger,
+		node:    node,
+		logger:  logger,
+		version: resolvedVersion,
 	}
 }
 
@@ -55,6 +62,7 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 
 	// Status
 	r.HandleFunc("/v1/status", h.handleGetStatus).Methods("GET")
+	r.HandleFunc("/v1/version", h.handleGetVersion).Methods("GET")
 
 	// Block queries
 	r.HandleFunc("/v1/block/{height}/header", h.handleGetBlockHeader).Methods("GET")
@@ -112,7 +120,19 @@ func (h *Handler) loggingMiddleware(next http.Handler) http.Handler {
 
 func (h *Handler) jsonResponse(w http.ResponseWriter, data any) {
 	w.Header().Set("Content-Type", "application/json")
+	if version := h.effectiveVersion(); version != "" {
+		w.Header().Set("X-Neutrino-Version", version)
+	}
 	json.NewEncoder(w).Encode(data)
+}
+
+func (h *Handler) effectiveVersion() string {
+	if h.version != "" {
+		return h.version
+	}
+
+	status := h.node.GetStatus()
+	return status.Version
 }
 
 func (h *Handler) errorResponse(w http.ResponseWriter, code int, message string) {
@@ -124,7 +144,15 @@ func (h *Handler) errorResponse(w http.ResponseWriter, code int, message string)
 // Status endpoint
 func (h *Handler) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	status := h.node.GetStatus()
+	if status.Version == "" {
+		status.Version = h.effectiveVersion()
+	}
 	h.jsonResponse(w, status)
+}
+
+// Version endpoint.
+func (h *Handler) handleGetVersion(w http.ResponseWriter, r *http.Request) {
+	h.jsonResponse(w, map[string]any{"version": h.effectiveVersion()})
 }
 
 // Block header endpoint
@@ -365,6 +393,7 @@ func (h *Handler) handleRescan(w http.ResponseWriter, r *http.Request) {
 
 // Rescan status endpoint
 func (h *Handler) handleGetRescanStatus(w http.ResponseWriter, r *http.Request) {
+	nodeStatus := h.node.GetStatus()
 	status := h.node.RescanStatus()
 	h.jsonResponse(w, map[string]any{
 		"in_progress":       status.InProgress,
@@ -373,6 +402,8 @@ func (h *Handler) handleGetRescanStatus(w http.ResponseWriter, r *http.Request) 
 		"last_start_height": status.LastStartHeight,
 		"last_scanned_tip":  status.LastScannedTip,
 		"last_error":        status.LastError,
+		"watched_addresses": nodeStatus.WatchedAddresses,
+		"server_version":    h.effectiveVersion(),
 	})
 }
 

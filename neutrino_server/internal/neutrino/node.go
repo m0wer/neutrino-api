@@ -36,6 +36,7 @@ type Config struct {
 	DataDir             string
 	TorProxy            string
 	AddPeers            string
+	Version             string
 	MaxPeers            int
 	BanDuration         time.Duration
 	FilterCacheSize     int
@@ -51,6 +52,7 @@ type Config struct {
 // Node wraps a neutrino ChainService with additional functionality.
 type Node struct {
 	config       *Config
+	version      string
 	chainParams  *chaincfg.Params
 	chainService *neutrino.ChainService
 	rescanMgr    *RescanManager
@@ -89,10 +91,12 @@ type Transaction struct {
 
 // Status represents the current node status.
 type Status struct {
-	Synced       bool  `json:"synced"`
-	BlockHeight  int32 `json:"block_height"`
-	FilterHeight int32 `json:"filter_height"`
-	Peers        int   `json:"peers"`
+	Synced           bool   `json:"synced"`
+	BlockHeight      int32  `json:"block_height"`
+	FilterHeight     int32  `json:"filter_height"`
+	Peers            int    `json:"peers"`
+	Version          string `json:"version"`
+	WatchedAddresses int    `json:"watched_addresses"`
 }
 
 // NewNode creates a new neutrino node.
@@ -124,10 +128,14 @@ func NewNode(config *Config) (*Node, error) {
 
 	node := &Node{
 		config:       config,
+		version:      strings.TrimSpace(config.Version),
 		chainParams:  chainParams,
 		logger:       logger,
 		prefetchQuit: make(chan struct{}),
 		prefetchDone: make(chan struct{}),
+	}
+	if node.version == "" {
+		node.version = "dev"
 	}
 	node.prefetchLastHeight = config.PrefetchStart - 1
 
@@ -436,11 +444,18 @@ func (n *Node) GetStatus() Status {
 		peers = len(n.chainService.Peers())
 	}
 
+	watchedAddresses := 0
+	if n.rescanMgr != nil {
+		watchedAddresses = n.rescanMgr.WatchedAddressCount()
+	}
+
 	return Status{
-		Synced:       n.synced,
-		BlockHeight:  n.blockHeight,
-		FilterHeight: n.filterHeight,
-		Peers:        peers,
+		Synced:           n.synced,
+		BlockHeight:      n.blockHeight,
+		FilterHeight:     n.filterHeight,
+		Peers:            peers,
+		Version:          n.version,
+		WatchedAddresses: watchedAddresses,
 	}
 }
 

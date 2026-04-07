@@ -196,6 +196,35 @@ func TestGetStatus(t *testing.T) {
 	if status.Peers != 0 {
 		t.Errorf("expected 0 peers, got %d", status.Peers)
 	}
+
+	if status.Version != "dev" {
+		t.Errorf("expected default version dev, got %q", status.Version)
+	}
+
+	if status.WatchedAddresses != 0 {
+		t.Errorf("expected watched address count 0, got %d", status.WatchedAddresses)
+	}
+}
+
+func TestGetStatusIncludesConfiguredVersion(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+
+	node, err := NewNode(&Config{
+		Network:         "regtest",
+		DataDir:         "/tmp/test",
+		Version:         "v1.2.3-test",
+		FilterCacheSize: 4096,
+		Logger:          backend,
+		LogLevel:        "info",
+	})
+	if err != nil {
+		t.Fatalf("NewNode() failed: %v", err)
+	}
+
+	status := node.GetStatus()
+	if status.Version != "v1.2.3-test" {
+		t.Errorf("expected configured version, got %q", status.Version)
+	}
 }
 
 func TestComputePrefetchWorkerCount(t *testing.T) {

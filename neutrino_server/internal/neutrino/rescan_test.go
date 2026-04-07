@@ -111,6 +111,39 @@ func TestWatchAddress(t *testing.T) {
 	}
 }
 
+func TestWatchedAddressCount(t *testing.T) {
+	backend := btclog.NewBackend(nil)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	if got := mgr.WatchedAddressCount(); got != 0 {
+		t.Fatalf("expected empty watched count=0, got %d", got)
+	}
+
+	if err := mgr.WatchAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"); err != nil {
+		t.Fatalf("failed to watch address: %v", err)
+	}
+
+	if got := mgr.WatchedAddressCount(); got != 1 {
+		t.Fatalf("expected watched count=1, got %d", got)
+	}
+
+	// Duplicate should not increase count.
+	if err := mgr.WatchAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"); err != nil {
+		t.Fatalf("failed to watch duplicate address: %v", err)
+	}
+
+	if got := mgr.WatchedAddressCount(); got != 1 {
+		t.Fatalf("expected watched count to remain 1, got %d", got)
+	}
+}
+
 // TestAddUTXO tests adding UTXOs to the set.
 func TestAddUTXO(t *testing.T) {
 	backend := btclog.NewBackend(nil)
