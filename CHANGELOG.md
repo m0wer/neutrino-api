@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-04-08
+
 ### Fixed
 
 - Fix `.onion` peer hostname handling in ban checks by patching the neutrino
@@ -229,7 +231,8 @@ Existing deployments that relied on unauthenticated plain HTTP access will break
 - RESTful JSON API
 - Configurable via CLI flags or environment variables
 
-[Unreleased]: https://github.com/m0wer/neutrino-api/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/m0wer/neutrino-api/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/m0wer/neutrino-api/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/m0wer/neutrino-api/compare/v0.10.0...v1.0.0
 [0.10.0]: https://github.com/m0wer/neutrino-api/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/m0wer/neutrino-api/compare/v0.8.0...v0.9.0
