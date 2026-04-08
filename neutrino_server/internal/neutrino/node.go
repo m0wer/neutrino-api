@@ -284,17 +284,24 @@ func (n *Node) startChainService(useTor bool) error {
 
 		// Set up DNS resolution through Tor to prevent DNS leaks
 		neutrinoConfig.NameResolver = func(host string) ([]net.IP, error) {
-			if ip := net.ParseIP(host); ip != nil {
+			lookupHost := host
+			if splitHost, _, err := net.SplitHostPort(host); err == nil {
+				lookupHost = splitHost
+			}
+
+			if ip := net.ParseIP(lookupHost); ip != nil {
 				return []net.IP{ip}, nil
 			}
 
-			if strings.HasSuffix(host, ".onion") {
-				return []net.IP{net.IP([]byte(host))}, nil
+			if strings.HasSuffix(strings.ToLower(lookupHost), ".onion") {
+				// Tor hostnames are not DNS-resolved. They are dialed directly
+				// through SOCKS when selected as peers.
+				return nil, nil
 			}
 
-			ips, err := connmgr.TorLookupIP(host, n.config.TorProxy)
+			ips, err := connmgr.TorLookupIP(lookupHost, n.config.TorProxy)
 			if err != nil {
-				n.logger.Warnf("Tor DNS lookup failed for %s: %v", host, err)
+				n.logger.Warnf("Tor DNS lookup failed for %s: %v", lookupHost, err)
 				return nil, err
 			}
 

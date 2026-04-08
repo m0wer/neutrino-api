@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fix `.onion` peer hostname handling in ban checks by patching the neutrino
+  ban manager parser to support Tor v2/v3 addresses, so discovered onion peers
+  no longer trigger `unsupported IP type` parse errors.
+
 ## [1.0.0] - 2026-04-07
 
 ### Added
