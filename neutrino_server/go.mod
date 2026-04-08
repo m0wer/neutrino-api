@@ -1,4 +1,4 @@
-module github.com/yourusername/neutrino-api/neutrino_server
+module github.com/m0wer/neutrino-api/neutrino_server
 
 go 1.25
 
@@ -14,7 +14,7 @@ require (
 	golang.org/x/net v0.48.0
 )
 
-replace github.com/lightninglabs/neutrino => ../../neutrino
+replace github.com/lightninglabs/neutrino => github.com/m0wer/neutrino v0.0.0-20260408081224-d29158106639
 
 require (
 	github.com/aead/siphash v1.0.1 // indirect

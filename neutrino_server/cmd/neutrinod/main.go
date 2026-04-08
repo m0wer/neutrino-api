@@ -19,9 +19,9 @@ import (
 	"github.com/btcsuite/btclog"
 	"github.com/gorilla/mux"
 
-	"github.com/yourusername/neutrino-api/neutrino_server/internal/api"
-	"github.com/yourusername/neutrino-api/neutrino_server/internal/auth"
-	"github.com/yourusername/neutrino-api/neutrino_server/internal/neutrino"
+	"github.com/m0wer/neutrino-api/neutrino_server/internal/api"
+	"github.com/m0wer/neutrino-api/neutrino_server/internal/auth"
+	"github.com/m0wer/neutrino-api/neutrino_server/internal/neutrino"
 )
 
 var (

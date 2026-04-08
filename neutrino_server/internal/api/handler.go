@@ -17,7 +17,7 @@ import (
 	"github.com/btcsuite/btclog"
 	"github.com/gorilla/mux"
 
-	"github.com/yourusername/neutrino-api/neutrino_server/internal/neutrino"
+	"github.com/m0wer/neutrino-api/neutrino_server/internal/neutrino"
 )
 
 // NodeInterface defines the interface for neutrino node operations.

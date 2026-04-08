@@ -72,27 +72,27 @@ The GitHub Actions workflow will automatically:
    - Release notes
 
 4. **Push Docker Images** to:
-   - `ghcr.io/yourusername/neutrino-api:v1.0.0`
-   - `ghcr.io/yourusername/neutrino-api:v1.0`
-   - `ghcr.io/yourusername/neutrino-api:v1`
-   - `ghcr.io/yourusername/neutrino-api:latest` (if main branch)
+   - `ghcr.io/m0wer/neutrino-api:v1.0.0`
+   - `ghcr.io/m0wer/neutrino-api:v1.0`
+   - `ghcr.io/m0wer/neutrino-api:v1`
+   - `ghcr.io/m0wer/neutrino-api:latest` (if main branch)
 
-Monitor at: `https://github.com/yourusername/neutrino-api/actions`
+Monitor at: `https://github.com/m0wer/neutrino-api/actions`
 
 ### 5. Verify Release
 
 ```bash
 # Check GitHub release page
-open https://github.com/yourusername/neutrino-api/releases
+open https://github.com/m0wer/neutrino-api/releases
 
 # Test binary download
-wget https://github.com/yourusername/neutrino-api/releases/download/v1.0.0/neutrinod-linux-amd64
+wget https://github.com/m0wer/neutrino-api/releases/download/v1.0.0/neutrinod-linux-amd64
 chmod +x neutrinod-linux-amd64
 ./neutrinod-linux-amd64 --version
 
 # Verify signed checksums
-wget https://github.com/yourusername/neutrino-api/releases/download/v1.0.0/SHA256SUMS
-wget https://github.com/yourusername/neutrino-api/releases/download/v1.0.0/SHA256SUMS.asc
+wget https://github.com/m0wer/neutrino-api/releases/download/v1.0.0/SHA256SUMS
+wget https://github.com/m0wer/neutrino-api/releases/download/v1.0.0/SHA256SUMS.asc
 gpg --import signatures/pubkeys/1C53A412D11EF3051704419C44912E1E03005B31.asc
 gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum -c SHA256SUMS
@@ -101,8 +101,8 @@ sha256sum -c SHA256SUMS
 ./scripts/verify-release-build.sh v1.0.0
 
 # Test Docker image
-docker pull ghcr.io/yourusername/neutrino-api:v1.0.0
-docker run --rm ghcr.io/yourusername/neutrino-api:v1.0.0 neutrinod --version
+docker pull ghcr.io/m0wer/neutrino-api:v1.0.0
+docker run --rm ghcr.io/m0wer/neutrino-api:v1.0.0 neutrinod --version
 ```
 
 ### 6. Announce Release
@@ -191,7 +191,7 @@ git push origin v2.0.0
 
 ### Release workflow fails
 
-1. Check workflow logs: `https://github.com/yourusername/neutrino-api/actions`
+1. Check workflow logs: `https://github.com/m0wer/neutrino-api/actions`
 2. Common issues:
    - Tests failing: Fix and push new commit
    - Build errors: Check Go version, dependencies
