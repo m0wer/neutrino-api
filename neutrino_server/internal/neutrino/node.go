@@ -7,6 +7,7 @@ BIP157/BIP158 compact block filters for privacy-preserving blockchain access.
 package neutrino
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -342,7 +343,7 @@ func (n *Node) startChainService(useTor bool) error {
 
 	// Start the chain service
 	n.logger.Info("Starting chain service...")
-	if err := n.chainService.Start(); err != nil {
+	if err := n.chainService.Start(context.Background()); err != nil {
 		return fmt.Errorf("failed to start chain service: %w", err)
 	}
 	n.logger.Infof("Chain service started successfully (%s)", modeStr)
