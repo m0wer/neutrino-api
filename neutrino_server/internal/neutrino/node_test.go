@@ -2,6 +2,7 @@ package neutrino
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -630,6 +631,268 @@ func TestParseCFilterChunk(t *testing.T) {
 				len(filters), len(filters[0]))
 		}
 	})
+}
+
+func TestComputeCDNChunkBounds(t *testing.T) {
+	tests := []struct {
+		name          string
+		startHeight   int32
+		bestFilter    int32
+		bestBlock     int32
+		chunkSize     int
+		wantFirst     int32
+		wantLast      int32
+		wantHasChunks bool
+	}{
+		{
+			name:          "no full chunk yet",
+			startHeight:   0,
+			bestFilter:    1500,
+			bestBlock:     1500,
+			chunkSize:     2000,
+			wantFirst:     0,
+			wantLast:      0,
+			wantHasChunks: false,
+		},
+		{
+			name:          "exactly one full chunk",
+			startHeight:   0,
+			bestFilter:    1999,
+			bestBlock:     1999,
+			chunkSize:     2000,
+			wantFirst:     0,
+			wantLast:      0,
+			wantHasChunks: true,
+		},
+		{
+			name:          "multiple full chunks",
+			startHeight:   0,
+			bestFilter:    4999,
+			bestBlock:     4999,
+			chunkSize:     2000,
+			wantFirst:     0,
+			wantLast:      2000,
+			wantHasChunks: true,
+		},
+		{
+			name:          "start inside first chunk floor-aligns",
+			startHeight:   1,
+			bestFilter:    3999,
+			bestBlock:     3999,
+			chunkSize:     2000,
+			wantFirst:     0,
+			wantLast:      2000,
+			wantHasChunks: true,
+		},
+		{
+			name:          "start mid-chunk floor-aligns",
+			startHeight:   500,
+			bestFilter:    5999,
+			bestBlock:     5999,
+			chunkSize:     2000,
+			wantFirst:     0,
+			wantLast:      4000,
+			wantHasChunks: true,
+		},
+		{
+			name:          "start on chunk boundary",
+			startHeight:   2000,
+			bestFilter:    5999,
+			bestBlock:     5999,
+			chunkSize:     2000,
+			wantFirst:     2000,
+			wantLast:      4000,
+			wantHasChunks: true,
+		},
+		{
+			name:          "fallback to best block",
+			startHeight:   0,
+			bestFilter:    0,
+			bestBlock:     3999,
+			chunkSize:     2000,
+			wantFirst:     0,
+			wantLast:      2000,
+			wantHasChunks: true,
+		},
+		{
+			name:          "start beyond available chunks",
+			startHeight:   4000,
+			bestFilter:    3999,
+			bestBlock:     3999,
+			chunkSize:     2000,
+			wantFirst:     4000,
+			wantLast:      2000,
+			wantHasChunks: false,
+		},
+		{
+			name:          "zero chunk size",
+			startHeight:   0,
+			bestFilter:    5999,
+			bestBlock:     5999,
+			chunkSize:     0,
+			wantFirst:     0,
+			wantLast:      0,
+			wantHasChunks: false,
+		},
+		{
+			name:          "negative chunk size",
+			startHeight:   0,
+			bestFilter:    5999,
+			bestBlock:     5999,
+			chunkSize:     -1,
+			wantFirst:     0,
+			wantLast:      0,
+			wantHasChunks: false,
+		},
+		{
+			name:          "realistic mainnet lookback",
+			startHeight:   844338,
+			bestFilter:    944338,
+			bestBlock:     944338,
+			chunkSize:     2000,
+			wantFirst:     844000,
+			wantLast:      942000,
+			wantHasChunks: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			first, last, hasChunks := computeCDNChunkBounds(
+				tt.startHeight,
+				tt.bestFilter,
+				tt.bestBlock,
+				tt.chunkSize,
+			)
+
+			if first != tt.wantFirst {
+				t.Fatalf("first=%d want %d", first, tt.wantFirst)
+			}
+			if last != tt.wantLast {
+				t.Fatalf("last=%d want %d", last, tt.wantLast)
+			}
+			if hasChunks != tt.wantHasChunks {
+				t.Fatalf("hasChunks=%v want %v", hasChunks, tt.wantHasChunks)
+			}
+		})
+	}
+}
+
+func TestCDNLastHeightAdvanceRules(t *testing.T) {
+	tests := []struct {
+		name               string
+		start              int32
+		cdnImported        int
+		cdnLastHeight      int32
+		coveredFromStart   bool
+		wantStart          int32
+		wantPrefetchUpdate bool
+	}{
+		{
+			name:               "covered from requested start advances",
+			start:              100,
+			cdnImported:        2000,
+			cdnLastHeight:      2099,
+			coveredFromStart:   true,
+			wantStart:          2100,
+			wantPrefetchUpdate: true,
+		},
+		{
+			name:               "not covered does not advance",
+			start:              100,
+			cdnImported:        2000,
+			cdnLastHeight:      3999,
+			coveredFromStart:   false,
+			wantStart:          100,
+			wantPrefetchUpdate: false,
+		},
+		{
+			name:               "no import does not advance",
+			start:              100,
+			cdnImported:        0,
+			cdnLastHeight:      99,
+			coveredFromStart:   false,
+			wantStart:          100,
+			wantPrefetchUpdate: false,
+		},
+		{
+			name:               "floor-aligned start covers from before",
+			start:              500,
+			cdnImported:        4000,
+			cdnLastHeight:      3999,
+			coveredFromStart:   true,
+			wantStart:          4000,
+			wantPrefetchUpdate: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			start := tt.start
+			prefetchLast := tt.start - 1
+
+			if tt.coveredFromStart && tt.cdnLastHeight >= start {
+				if tt.cdnLastHeight > prefetchLast {
+					prefetchLast = tt.cdnLastHeight
+				}
+				start = tt.cdnLastHeight + 1
+			}
+
+			if start != tt.wantStart {
+				t.Fatalf("start=%d want %d", start, tt.wantStart)
+			}
+
+			updated := prefetchLast != tt.start-1
+			if updated != tt.wantPrefetchUpdate {
+				t.Fatalf("prefetch update=%v want %v",
+					updated, tt.wantPrefetchUpdate)
+			}
+		})
+	}
+}
+
+func TestIsVerificationError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "generic error",
+			err:  fmt.Errorf("connection refused"),
+			want: false,
+		},
+		{
+			name: "HTTP error",
+			err:  fmt.Errorf("fetch filters at height 928000: HTTP 500"),
+			want: false,
+		},
+		{
+			name: "verification failure",
+			err:  fmt.Errorf("import filters at height 928000: filter verification failed at height 928484: computed header abc != stored header def"),
+			want: true,
+		},
+		{
+			name: "wrapped verification failure",
+			err:  fmt.Errorf("download chunk: %w", fmt.Errorf("filter verification failed at height 100")),
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isVerificationError(tt.err)
+			if got != tt.want {
+				t.Fatalf("isVerificationError(%v) = %v, want %v",
+					tt.err, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestReadCompactSize(t *testing.T) {

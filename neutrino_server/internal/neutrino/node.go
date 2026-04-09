@@ -923,21 +923,27 @@ func (n *Node) runPrefetchPass(workers int) {
 	useTor := n.config.TorProxy != ""
 	cdnBaseURL := n.resolveCFilterCDNBaseURL()
 	if cdnBaseURL != "" {
-		cdnImported, cdnLastHeight, cdnErr := n.cdnPrefetchFilters(start, useTor)
-		if cdnErr != nil {
-			n.logger.Warnf("CDN cfilter prefetch error (will fall back to P2P): %v", cdnErr)
-		}
+		cdnImported, cdnLastHeight, coveredFromStart, _ :=
+			n.cdnPrefetchFilters(start, useTor)
 		if cdnImported > 0 {
 			n.logger.Infof("CDN cfilter prefetch imported %d filters up to height %d",
 				cdnImported, cdnLastHeight)
 		}
-		if cdnLastHeight >= start {
+		// Only advance the start pointer when CDN coverage is
+		// contiguous from the requested start. When CDN skipped chunks
+		// (gaps), P2P must scan the full range to fill them -- but
+		// P2P skips already-cached filters efficiently (~10s for
+		// cached ranges).
+		if coveredFromStart && cdnLastHeight >= start {
 			n.prefetchMu.Lock()
 			if cdnLastHeight > n.prefetchLastHeight {
 				n.prefetchLastHeight = cdnLastHeight
 			}
 			n.prefetchMu.Unlock()
 			start = cdnLastHeight + 1
+		} else if cdnImported > 0 {
+			n.logger.Infof("CDN cfilter prefetch: P2P will scan full range from %d (CDN had gaps or did not cover start)",
+				start)
 		}
 	}
 
@@ -1047,6 +1053,19 @@ func (n *Node) runPrefetchPass(workers int) {
 const (
 	defaultBlockDNStatusTimeout   = 8 * time.Second
 	defaultBlockDNFilterChunkSize = 2000
+
+	// cdnChunkMaxRetries is the number of retry attempts for a CDN chunk
+	// download before skipping that chunk and moving on.
+	cdnChunkMaxRetries = 2
+
+	// cdnChunkRetryDelay is the initial backoff delay between retries.
+	// Each subsequent retry doubles the delay.
+	cdnChunkRetryDelay = 2 * time.Second
+
+	// cdnMaxConsecutiveFailures is the maximum number of consecutive chunk
+	// failures before aborting the CDN prefetch entirely. This prevents
+	// wasting time when the CDN is consistently serving bad data.
+	cdnMaxConsecutiveFailures = 3
 )
 
 // blockDNStatus represents the /status response from a block-dn CDN server.
@@ -1236,21 +1255,83 @@ func (n *Node) downloadCFilterChunk(httpClient *http.Client, baseURL string, sta
 	return imported, nil
 }
 
+// downloadCFilterChunkWithRetry wraps downloadCFilterChunk with retry logic.
+// It retries up to cdnChunkMaxRetries times with exponential backoff for
+// transient errors (HTTP failures, network errors). Verification failures
+// (filter header mismatch) are not retried since they indicate bad data
+// that will not resolve on retry.
+func (n *Node) downloadCFilterChunkWithRetry(httpClient *http.Client, baseURL string, startHeight int32, chunkSize int) (int, error) {
+	var lastErr error
+	delay := cdnChunkRetryDelay
+
+	for attempt := range cdnChunkMaxRetries + 1 {
+		imported, err := n.downloadCFilterChunk(
+			httpClient, baseURL, startHeight, chunkSize,
+		)
+		if err == nil {
+			return imported, nil
+		}
+
+		// Don't retry verification failures -- they indicate bad CDN data.
+		if isVerificationError(err) {
+			return imported, err
+		}
+
+		lastErr = err
+		if attempt < cdnChunkMaxRetries {
+			n.logger.Debugf("CDN chunk at height %d attempt %d failed: %v (retrying in %s)",
+				startHeight, attempt+1, err, delay)
+
+			select {
+			case <-n.prefetchQuit:
+				return imported, err
+			case <-time.After(delay):
+			}
+
+			delay *= 2
+		}
+	}
+
+	return 0, lastErr
+}
+
+// isVerificationError returns true if the error indicates a filter
+// verification failure (computed header != stored header). These errors
+// should not be retried since they indicate bad data, not a transient issue.
+func isVerificationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "filter verification failed")
+}
+
 // cdnPrefetchFilters downloads and imports compact filters from the block-dn
 // CDN. It determines the available range from the CDN status endpoint, then
-// downloads chunks sequentially, verifying each against locally-stored filter
-// headers. Returns the number of filters imported and the last height processed.
-func (n *Node) cdnPrefetchFilters(startHeight int32, useTor bool) (imported int, lastHeight int32, err error) {
+// downloads chunks with retry and skip-on-failure logic. Each chunk is verified
+// against locally-stored filter headers via ImportCFilters.
+//
+// On chunk failure, the chunk is retried with exponential backoff. If retries
+// are exhausted, the chunk is skipped and the next one is attempted. After
+// cdnMaxConsecutiveFailures consecutive failures, CDN prefetch is aborted.
+// P2P fallback fills any gaps left by skipped chunks.
+//
+// Returns the number of filters imported, the last contiguous height processed,
+// and whether coverage starts from (or before) the requested startHeight.
+func (n *Node) cdnPrefetchFilters(startHeight int32,
+	useTor bool) (imported int, lastHeight int32,
+	coveredFromStart bool, err error) {
+
 	baseURL := n.resolveCFilterCDNBaseURL()
 	if baseURL == "" {
-		return 0, startHeight - 1, nil
+		return 0, startHeight - 1, false, nil
 	}
 
 	n.logger.Infof("CDN cfilter prefetch: resolving status from %s", baseURL)
 
 	status, err := n.fetchBlockDNStatus(baseURL, useTor)
 	if err != nil {
-		return 0, startHeight - 1, fmt.Errorf("fetch CDN status: %w", err)
+		return 0, startHeight - 1, false,
+			fmt.Errorf("fetch CDN status: %w", err)
 	}
 
 	chunkSize := int(status.EntriesPerFilterFile)
@@ -1258,36 +1339,32 @@ func (n *Node) cdnPrefetchFilters(startHeight int32, useTor bool) (imported int,
 		chunkSize = defaultBlockDNFilterChunkSize
 	}
 
-	// Determine CDN range: start must be aligned to chunk size.
-	cdnStart := (startHeight / int32(chunkSize)) * int32(chunkSize)
-	if cdnStart < startHeight {
-		cdnStart += int32(chunkSize)
-	}
-
-	// CDN filter height is the last height available.
-	cdnEnd := status.BestFilterHeight
-	if cdnEnd <= 0 {
-		cdnEnd = status.BestBlockHeight
-	}
-	// Align end to chunk boundary (last full chunk).
-	cdnEnd = (cdnEnd / int32(chunkSize)) * int32(chunkSize)
-
-	if cdnStart >= cdnEnd {
+	cdnStart, cdnLastChunkStart, hasChunks := computeCDNChunkBounds(
+		startHeight, status.BestFilterHeight, status.BestBlockHeight,
+		chunkSize,
+	)
+	if !hasChunks {
 		n.logger.Infof("CDN cfilter prefetch: no chunks available (start=%d, cdn_end=%d)",
-			startHeight, cdnEnd)
-		return 0, startHeight - 1, nil
+			startHeight, cdnLastChunkStart)
+		return 0, startHeight - 1, false, nil
 	}
 
-	totalChunks := (cdnEnd - cdnStart) / int32(chunkSize)
+	// Floor-aligned start always covers startHeight (the containing chunk
+	// is included), so coveredFromStart is always true when hasChunks is true.
+	coveredFromStart = cdnStart <= startHeight
+
+	totalChunks :=
+		((cdnLastChunkStart - cdnStart) / int32(chunkSize)) + 1
 	n.logger.Infof("CDN cfilter prefetch: downloading heights %d..%d (%d chunks of %d filters)",
-		cdnStart, cdnEnd+int32(chunkSize)-1, totalChunks, chunkSize)
+		cdnStart, cdnLastChunkStart+int32(chunkSize)-1,
+		totalChunks, chunkSize)
 
 	// Create HTTP client (Tor-aware if needed).
 	httpClient := &http.Client{Timeout: 2 * time.Minute}
 	if useTor && n.config.TorProxy != "" {
 		torDialer, torErr := proxy.SOCKS5("tcp", n.config.TorProxy, nil, proxy.Direct)
 		if torErr != nil {
-			return 0, startHeight - 1, fmt.Errorf(
+			return 0, startHeight - 1, coveredFromStart, fmt.Errorf(
 				"create Tor dialer for CDN: %w", torErr,
 			)
 		}
@@ -1298,26 +1375,41 @@ func (n *Node) cdnPrefetchFilters(startHeight int32, useTor bool) (imported int,
 	totalImported := 0
 	lastProcessed := startHeight - 1
 	started := time.Now()
+	consecutiveFailures := 0
+	skippedChunks := 0
 
-	for height := cdnStart; height < cdnEnd; height += int32(chunkSize) {
+	for height := cdnStart; height <= cdnLastChunkStart; height += int32(chunkSize) {
 		select {
 		case <-n.prefetchQuit:
 			n.logger.Info("CDN cfilter prefetch interrupted")
-			return totalImported, lastProcessed, nil
+			return totalImported, lastProcessed, coveredFromStart, nil
 		default:
 		}
 
-		chunkImported, chunkErr := n.downloadCFilterChunk(
+		chunkImported, chunkErr := n.downloadCFilterChunkWithRetry(
 			httpClient, baseURL, height, chunkSize,
 		)
 		totalImported += chunkImported
 
 		if chunkErr != nil {
-			n.logger.Warnf("CDN cfilter chunk at height %d failed: %v", height, chunkErr)
-			// Stop CDN prefetch on error; P2P will fill remaining.
-			return totalImported, lastProcessed, chunkErr
+			consecutiveFailures++
+			skippedChunks++
+			n.logger.Warnf("CDN cfilter chunk at height %d failed after retries: %v (consecutive failures: %d)",
+				height, chunkErr, consecutiveFailures)
+
+			if consecutiveFailures >= cdnMaxConsecutiveFailures {
+				n.logger.Warnf("CDN cfilter prefetch: %d consecutive failures, aborting CDN (P2P will fill remaining)",
+					consecutiveFailures)
+				break
+			}
+
+			// Skip this chunk and continue to the next one.
+			// P2P fallback will fill the gap.
+			continue
 		}
 
+		// Reset consecutive failure counter on success.
+		consecutiveFailures = 0
 		lastProcessed = height + int32(chunkSize) - 1
 		elapsed := time.Since(started)
 		chunksCompleted := (height-cdnStart)/int32(chunkSize) + 1
@@ -1326,10 +1418,58 @@ func (n *Node) cdnPrefetchFilters(startHeight int32, useTor bool) (imported int,
 	}
 
 	elapsed := time.Since(started)
-	n.logger.Infof("CDN cfilter prefetch complete: %d filters imported in %s",
-		totalImported, elapsed.Round(time.Second))
+	if skippedChunks > 0 {
+		n.logger.Infof("CDN cfilter prefetch done: %d filters imported, %d chunks skipped, %s elapsed (P2P will fill gaps)",
+			totalImported, skippedChunks, elapsed.Round(time.Second))
+	} else {
+		n.logger.Infof("CDN cfilter prefetch complete: %d filters imported in %s",
+			totalImported, elapsed.Round(time.Second))
+	}
 
-	return totalImported, lastProcessed, nil
+	return totalImported, lastProcessed, coveredFromStart, nil
+}
+
+// computeCDNChunkBounds returns the first and last cfilter chunk start heights
+// to request from the CDN for the given start height and status values.
+//
+// The first chunk start is floor-aligned to the chunk size so that the chunk
+// containing startHeight is included. ImportCFilters handles filters before
+// startHeight correctly (they are stored and verified, which is harmless).
+//
+// The returned last chunk start is inclusive. hasChunks is false when there is
+// no full chunk to request.
+func computeCDNChunkBounds(startHeight, bestFilterHeight, bestBlockHeight int32,
+	chunkSize int) (firstChunkStart int32, lastChunkStart int32,
+	hasChunks bool) {
+
+	if chunkSize <= 0 {
+		return 0, 0, false
+	}
+
+	chunkSizeI32 := int32(chunkSize)
+
+	// Floor-align: include the chunk that contains startHeight.
+	firstChunkStart = (startHeight / chunkSizeI32) * chunkSizeI32
+
+	bestHeight := bestFilterHeight
+	if bestHeight <= 0 {
+		bestHeight = bestBlockHeight
+	}
+
+	// Chunk endpoints are inclusive. A full chunk [N, N+chunkSize-1]
+	// is available only when bestHeight >= N+chunkSize-1.
+	availableCount := int64(bestHeight) + 1
+	if availableCount < int64(chunkSize) {
+		return firstChunkStart, 0, false
+	}
+
+	numFullChunks := availableCount / int64(chunkSize)
+	lastChunkStart = int32((numFullChunks - 1) * int64(chunkSize))
+	if firstChunkStart > lastChunkStart {
+		return firstChunkStart, lastChunkStart, false
+	}
+
+	return firstChunkStart, lastChunkStart, true
 }
 
 // getChainParams returns the chain parameters for the given network.
