@@ -28,6 +28,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Add `ImportCFilter()` and `ImportCFilters()` methods to the neutrino fork
     for verified bulk cfilter import.
 
+### Fixed
+
+- **CDN chunk bounds now floor-align to include the containing chunk.**
+  Previously, when the prefetch start height did not align to a chunk boundary,
+  the first available chunk was skipped, leaving a gap that required P2P
+  fallback. The start is now floor-aligned so the chunk containing the
+  requested start height is always downloaded.
+- **CDN prefetch continues past failed chunks instead of aborting.**
+  Previously, any CDN chunk failure (verification mismatch or HTTP error)
+  would abort the entire CDN prefetch, forcing P2P to fetch all remaining
+  filters. Now, failed chunks are retried with exponential backoff, and if
+  retries are exhausted the chunk is skipped. CDN continues with subsequent
+  chunks, and P2P fills only the specific gaps. CDN prefetch is aborted
+  only after 3 consecutive failures.
+- **Pin neutrino fork dependency to pushed commit.**
+  Replace local path `replace` directive with versioned pseudo-version
+  pointing to `m0wer/neutrino@c1b598b97446`.
+
 ## [1.0.1] - 2026-04-08
 
 ### Fixed
