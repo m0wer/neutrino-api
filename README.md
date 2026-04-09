@@ -97,6 +97,9 @@ Anyone can reproduce and verify a release locally with one command:
 | `LOG_LEVEL` | `info` | Log level (trace, debug, info, warn, error) |
 | `ADD_PEERS` | | Comma-separated list of preferred peers (e.g., `node1:8333,node2:8333`) while still allowing peer discovery |
 | `TOR_PROXY` | | Tor SOCKS5 proxy address (e.g., `127.0.0.1:9050`) |
+| `CLEARNET_INITIAL_SYNC` | `true` | When `TOR_PROXY` is set, perform initial public header sync over clearnet before switching to Tor |
+| `CFILTER_CDN_AUTO` | `true` | Auto-download compact filters from block-dn CDN after P2P header sync (verified against filter headers) |
+| `CFILTER_CDN_URL` | | Override block-dn base URL for compact filter CDN downloads |
 | `MAX_PEERS` | `8` | Maximum number of peers to connect to |
 | `NO_AUTH` | `false` | Disable TLS and token authentication (for development/regtest) |
 
@@ -110,6 +113,8 @@ Anyone can reproduce and verify a release locally with one command:
   --loglevel=info \
   --addpeer=peer1:8333,peer2:8333 \
   --torproxy=127.0.0.1:9050 \
+  --clearnet-initial-sync=true \
+  --cfilter-cdn-auto=true \
   --maxpeers=8 \
   --no-auth        # Disable TLS + auth (dev/regtest only)
   # --reset-auth   # Regenerate TLS cert and auth token, then exit
@@ -181,9 +186,29 @@ If you have Tor installed locally:
 # Start Tor (default SOCKS5 proxy on 127.0.0.1:9050)
 tor
 
-# Run neutrino
-./neutrinod --network=mainnet --torproxy=127.0.0.1:9050
+# Run neutrino (single-phase Tor mode: P2P and CDN traffic via Tor)
+./neutrinod \
+  --network=mainnet \
+  --torproxy=127.0.0.1:9050 \
+  --clearnet-initial-sync=false \
+  --cfilter-cdn-auto=true
 ```
+
+By default (`CFILTER_CDN_AUTO=true`), the server downloads compact filters
+from block-dn after P2P header sync completes. Filters are verified against
+P2P-synced filter headers before storage. Supported networks:
+
+- mainnet: `https://block-dn.org`
+- signet: `https://signet.block-dn.org`
+- testnet3: `https://testnet3.block-dn.org`
+
+If `CFILTER_CDN_URL` is set, it overrides the auto-resolved URL. CDN
+downloads are routed through Tor when a SOCKS5 proxy is configured.
+
+When `TOR_PROXY` and `CLEARNET_INITIAL_SYNC=true` are both set (default),
+P2P header sync runs over clearnet in phase 1, then the chain service
+restarts with Tor for privacy-sensitive operations (filter fetches, block
+downloads, broadcasts).
 
 ## API Reference
 

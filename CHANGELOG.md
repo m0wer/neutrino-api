@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Replace HTTP header import with CDN compact filter (cfilter) prefetch.**
+  Block headers and filter headers are now synced exclusively via P2P (trusted),
+  while compact block filters can be bulk-downloaded from a block-dn CDN and
+  verified against the P2P-synced filter headers before storage. This provides
+  a better trust/performance balance: headers come from P2P consensus, filters
+  are cryptographically verified against those headers, and the CDN is used
+  only as untrusted transport for large filter data.
+  - New config: `CFILTER_CDN_AUTO` / `--cfilter-cdn-auto` (default: `true`)
+    enables automatic cfilter download from block-dn after P2P header sync.
+  - New config: `CFILTER_CDN_URL` / `--cfilter-cdn-url` overrides the
+    auto-resolved block-dn base URL.
+  - Removed config: `HEADER_IMPORT_AUTO`, `HEADER_IMPORT_BLOCK_URL`,
+    `HEADER_IMPORT_FILTER_URL` and their corresponding CLI flags.
+  - Removed header import fallback retry logic from chain service startup.
+  - CDN filters are downloaded in 2000-filter chunks, parsed from CompactSize
+    varint binary format, and verified via `ChainService.ImportCFilters()`.
+  - Add `ImportCFilter()` and `ImportCFilters()` methods to the neutrino fork
+    for verified bulk cfilter import.
+
 ## [1.0.1] - 2026-04-08
 
 ### Fixed
