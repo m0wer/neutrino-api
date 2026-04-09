@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-04-09
+
 ### Changed
 
 - **Replace HTTP header import with CDN compact filter (cfilter) prefetch.**
@@ -270,7 +272,8 @@ Existing deployments that relied on unauthenticated plain HTTP access will break
 - RESTful JSON API
 - Configurable via CLI flags or environment variables
 
-[Unreleased]: https://github.com/m0wer/neutrino-api/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/m0wer/neutrino-api/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/m0wer/neutrino-api/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/m0wer/neutrino-api/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/m0wer/neutrino-api/compare/v0.10.0...v1.0.0
 [0.10.0]: https://github.com/m0wer/neutrino-api/compare/v0.9.0...v0.10.0
