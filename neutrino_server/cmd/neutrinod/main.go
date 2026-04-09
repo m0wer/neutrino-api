@@ -42,6 +42,8 @@ func main() {
 	prefetchStart := flag.Int("prefetchstart", getEnvInt("PREFETCH_START", 0), "Start height for background filter prefetch")
 	prefetchLookback := flag.Int("prefetchlookback", getEnvInt("PREFETCH_LOOKBACK", 105120), "When >0 and prefetchstart=0, auto-compute prefetch start as tip minus this many blocks (~2 years default)")
 	clearnetInitialSync := flag.Bool("clearnet-initial-sync", getEnvBool("CLEARNET_INITIAL_SYNC", true), "Sync block headers over clearnet before switching to Tor (safe: headers are public data)")
+	cfilterCDNAuto := flag.Bool("cfilter-cdn-auto", getEnvBool("CFILTER_CDN_AUTO", true), "Enable automatic compact filter download from block-dn CDN after P2P header sync")
+	cfilterCDNURL := flag.String("cfilter-cdn-url", getEnv("CFILTER_CDN_URL", ""), "Override block-dn base URL for compact filter CDN downloads")
 	noAuth := flag.Bool("no-auth", getEnvBool("NO_AUTH", false), "Disable TLS and token authentication (for development/regtest)")
 	resetAuth := flag.Bool("reset-auth", false, "Regenerate TLS cert and auth token, clear watched addresses, then exit")
 	showVersion := flag.Bool("version", false, "Show version and exit")
@@ -123,6 +125,8 @@ func main() {
 		PrefetchStart:       int32(*prefetchStart),
 		PrefetchLookback:    int32(*prefetchLookback),
 		ClearnetInitialSync: *clearnetInitialSync,
+		CFilterCDNAuto:      *cfilterCDNAuto,
+		CFilterCDNURL:       *cfilterCDNURL,
 		Logger:              backend,
 		LogLevel:            *logLevel,
 	}

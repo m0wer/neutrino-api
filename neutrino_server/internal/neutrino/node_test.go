@@ -2,11 +2,14 @@ package neutrino
 
 import (
 	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btclog"
+	"golang.org/x/net/proxy"
 )
 
 func TestNewNode(t *testing.T) {
@@ -325,6 +328,335 @@ func TestUTXOSpendReportJSON(t *testing.T) {
 				} else if uint32(bh) != tt.report.BlockHeight {
 					t.Errorf("block_height = %v, want %d", bh, tt.report.BlockHeight)
 				}
+			}
+		})
+	}
+}
+
+func TestNewNodeWithCFilterCDNConfig(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+
+	tests := []struct {
+		name    string
+		cdnAuto bool
+		cdnURL  string
+	}{
+		{
+			name:    "auto enabled",
+			cdnAuto: true,
+			cdnURL:  "",
+		},
+		{
+			name:    "explicit URL",
+			cdnAuto: false,
+			cdnURL:  "https://example.com",
+		},
+		{
+			name:    "both disabled",
+			cdnAuto: false,
+			cdnURL:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := NewNode(&Config{
+				Network:         "regtest",
+				DataDir:         "/tmp/test",
+				FilterCacheSize: 4096,
+				Logger:          backend,
+				LogLevel:        "info",
+				CFilterCDNAuto:  tt.cdnAuto,
+				CFilterCDNURL:   tt.cdnURL,
+			})
+			if err != nil {
+				t.Fatalf("NewNode() failed: %v", err)
+			}
+			if node == nil {
+				t.Fatal("NewNode() returned nil")
+			}
+			if node.config.CFilterCDNAuto != tt.cdnAuto {
+				t.Errorf("CFilterCDNAuto = %v, want %v",
+					node.config.CFilterCDNAuto, tt.cdnAuto)
+			}
+			if node.config.CFilterCDNURL != tt.cdnURL {
+				t.Errorf("CFilterCDNURL = %q, want %q",
+					node.config.CFilterCDNURL, tt.cdnURL)
+			}
+		})
+	}
+}
+
+// mockDialer implements proxy.Dialer for testing.
+type mockDialer struct{}
+
+func (d *mockDialer) Dial(network, addr string) (net.Conn, error) {
+	return nil, net.ErrClosed
+}
+
+// Compile-time check that mockDialer implements proxy.Dialer.
+var _ proxy.Dialer = (*mockDialer)(nil)
+
+func TestNewTorHTTPClient(t *testing.T) {
+	client := newTorHTTPClient(&mockDialer{})
+	if client == nil {
+		t.Fatal("newTorHTTPClient() returned nil")
+	}
+
+	// Verify it's an *http.Client.
+	httpClient, ok := any(client).(*http.Client)
+	if !ok {
+		t.Fatal("newTorHTTPClient() did not return *http.Client")
+	}
+
+	// Verify a custom transport is set.
+	if httpClient.Transport == nil {
+		t.Fatal("expected custom transport, got nil")
+	}
+
+	transport, ok := httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", httpClient.Transport)
+	}
+
+	// Verify DialContext is set (the SOCKS5 wrapper).
+	if transport.DialContext == nil {
+		t.Fatal("expected DialContext to be set on transport")
+	}
+}
+
+func TestDefaultBlockDNProvider(t *testing.T) {
+	tests := []struct {
+		network       string
+		wantBaseURL   string
+		wantChainName string
+		wantOK        bool
+	}{
+		{"mainnet", "https://block-dn.org", "mainnet", true},
+		{"signet", "https://signet.block-dn.org", "signet", true},
+		{"testnet", "https://testnet3.block-dn.org", "testnet3", true},
+		{"regtest", "", "", false},
+		{"invalid", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.network, func(t *testing.T) {
+			baseURL, chainName, ok := defaultBlockDNProvider(tt.network)
+			if ok != tt.wantOK {
+				t.Fatalf("ok=%v want %v", ok, tt.wantOK)
+			}
+			if baseURL != tt.wantBaseURL {
+				t.Fatalf("baseURL=%q want %q", baseURL, tt.wantBaseURL)
+			}
+			if chainName != tt.wantChainName {
+				t.Fatalf("chainName=%q want %q", chainName, tt.wantChainName)
+			}
+		})
+	}
+}
+
+func TestResolveCFilterCDNBaseURL(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+
+	newTestNode := func(cfg *Config) *Node {
+		n, err := NewNode(cfg)
+		if err != nil {
+			t.Fatalf("NewNode() failed: %v", err)
+		}
+		return n
+	}
+
+	t.Run("explicit URL", func(t *testing.T) {
+		n := newTestNode(&Config{
+			Network:         "regtest",
+			DataDir:         "/tmp/test",
+			FilterCacheSize: 4096,
+			Logger:          backend,
+			LogLevel:        "info",
+			CFilterCDNURL:   "https://example.com/cdn/",
+		})
+
+		got := n.resolveCFilterCDNBaseURL()
+		if got != "https://example.com/cdn" {
+			t.Fatalf("expected trimmed URL, got %q", got)
+		}
+	})
+
+	t.Run("auto mainnet", func(t *testing.T) {
+		n := newTestNode(&Config{
+			Network:         "mainnet",
+			DataDir:         "/tmp/test",
+			FilterCacheSize: 4096,
+			Logger:          backend,
+			LogLevel:        "info",
+			CFilterCDNAuto:  true,
+		})
+
+		got := n.resolveCFilterCDNBaseURL()
+		if got != "https://block-dn.org" {
+			t.Fatalf("expected block-dn mainnet URL, got %q", got)
+		}
+	})
+
+	t.Run("auto disabled no URL", func(t *testing.T) {
+		n := newTestNode(&Config{
+			Network:         "mainnet",
+			DataDir:         "/tmp/test",
+			FilterCacheSize: 4096,
+			Logger:          backend,
+			LogLevel:        "info",
+			CFilterCDNAuto:  false,
+		})
+
+		got := n.resolveCFilterCDNBaseURL()
+		if got != "" {
+			t.Fatalf("expected empty URL, got %q", got)
+		}
+	})
+
+	t.Run("auto unsupported network", func(t *testing.T) {
+		n := newTestNode(&Config{
+			Network:         "regtest",
+			DataDir:         "/tmp/test",
+			FilterCacheSize: 4096,
+			Logger:          backend,
+			LogLevel:        "info",
+			CFilterCDNAuto:  true,
+		})
+
+		got := n.resolveCFilterCDNBaseURL()
+		if got != "" {
+			t.Fatalf("expected empty URL for regtest, got %q", got)
+		}
+	})
+
+	t.Run("explicit overrides auto", func(t *testing.T) {
+		n := newTestNode(&Config{
+			Network:         "mainnet",
+			DataDir:         "/tmp/test",
+			FilterCacheSize: 4096,
+			Logger:          backend,
+			LogLevel:        "info",
+			CFilterCDNAuto:  true,
+			CFilterCDNURL:   "https://custom.example.com",
+		})
+
+		got := n.resolveCFilterCDNBaseURL()
+		if got != "https://custom.example.com" {
+			t.Fatalf("expected custom URL, got %q", got)
+		}
+	})
+}
+
+func TestParseCFilterChunk(t *testing.T) {
+	t.Run("single small filter", func(t *testing.T) {
+		// CompactSize(4) = 0x04, filter = 4 bytes
+		data := []byte{0x04, 0x01, 0x7f, 0xa8, 0x80}
+		filters, err := parseCFilterChunk(data, 1)
+		if err != nil {
+			t.Fatalf("parseCFilterChunk() error: %v", err)
+		}
+		if len(filters) != 1 {
+			t.Fatalf("expected 1 filter, got %d", len(filters))
+		}
+		if len(filters[0]) != 4 {
+			t.Fatalf("expected 4 bytes, got %d", len(filters[0]))
+		}
+	})
+
+	t.Run("multiple filters", func(t *testing.T) {
+		// Two filters: CompactSize(2) + 2 bytes, CompactSize(3) + 3 bytes
+		data := []byte{
+			0x02, 0xaa, 0xbb, // filter 1: len=2, data=aa bb
+			0x03, 0xcc, 0xdd, 0xee, // filter 2: len=3, data=cc dd ee
+		}
+		filters, err := parseCFilterChunk(data, 2)
+		if err != nil {
+			t.Fatalf("parseCFilterChunk() error: %v", err)
+		}
+		if len(filters) != 2 {
+			t.Fatalf("expected 2 filters, got %d", len(filters))
+		}
+		if len(filters[0]) != 2 || filters[0][0] != 0xaa {
+			t.Fatalf("unexpected filter 0: %x", filters[0])
+		}
+		if len(filters[1]) != 3 || filters[1][0] != 0xcc {
+			t.Fatalf("unexpected filter 1: %x", filters[1])
+		}
+	})
+
+	t.Run("count mismatch", func(t *testing.T) {
+		data := []byte{0x02, 0xaa, 0xbb}
+		_, err := parseCFilterChunk(data, 2)
+		if err == nil {
+			t.Fatal("expected error for count mismatch")
+		}
+	})
+
+	t.Run("truncated data", func(t *testing.T) {
+		// Says length 10 but only has 2 bytes
+		data := []byte{0x0a, 0xaa, 0xbb}
+		_, err := parseCFilterChunk(data, 1)
+		if err == nil {
+			t.Fatal("expected error for truncated data")
+		}
+	})
+
+	t.Run("empty data empty count", func(t *testing.T) {
+		filters, err := parseCFilterChunk([]byte{}, 0)
+		if err != nil {
+			t.Fatalf("parseCFilterChunk() error: %v", err)
+		}
+		if len(filters) != 0 {
+			t.Fatalf("expected 0 filters, got %d", len(filters))
+		}
+	})
+
+	t.Run("two-byte CompactSize", func(t *testing.T) {
+		// CompactSize for value 300 (0x012c): fd 2c 01
+		data := make([]byte, 3+300)
+		data[0] = 0xfd
+		data[1] = 0x2c // low byte
+		data[2] = 0x01 // high byte
+		for i := range 300 {
+			data[3+i] = byte(i)
+		}
+		filters, err := parseCFilterChunk(data, 1)
+		if err != nil {
+			t.Fatalf("parseCFilterChunk() error: %v", err)
+		}
+		if len(filters) != 1 || len(filters[0]) != 300 {
+			t.Fatalf("expected 1 filter of 300 bytes, got %d filters, first len %d",
+				len(filters), len(filters[0]))
+		}
+	})
+}
+
+func TestReadCompactSize(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      []byte
+		wantVal   uint64
+		wantBytes int
+	}{
+		{"single byte 0", []byte{0x00}, 0, 1},
+		{"single byte 252", []byte{0xfc}, 252, 1},
+		{"two byte 253", []byte{0xfd, 0xfd, 0x00}, 253, 3},
+		{"two byte 1000", []byte{0xfd, 0xe8, 0x03}, 1000, 3},
+		{"four byte", []byte{0xfe, 0x01, 0x00, 0x01, 0x00}, 65537, 5},
+		{"empty", []byte{}, 0, 0},
+		{"truncated two byte", []byte{0xfd, 0x01}, 0, 0},
+		{"truncated four byte", []byte{0xfe, 0x01, 0x02}, 0, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			val, n := readCompactSize(tt.data)
+			if val != tt.wantVal {
+				t.Errorf("value = %d, want %d", val, tt.wantVal)
+			}
+			if n != tt.wantBytes {
+				t.Errorf("bytes consumed = %d, want %d", n, tt.wantBytes)
 			}
 		})
 	}

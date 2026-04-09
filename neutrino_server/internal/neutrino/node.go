@@ -8,9 +8,12 @@ package neutrino
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -48,6 +51,15 @@ type Config struct {
 	ClearnetInitialSync bool  // When true and TorProxy set, sync headers over clearnet first
 	Logger              *btclog.Backend
 	LogLevel            string
+
+	// CFilterCDNAuto enables automatic compact filter (cfilter) bulk
+	// download from block-dn after P2P header sync completes. Filters
+	// are verified against P2P-synced filter headers before storage.
+	CFilterCDNAuto bool
+
+	// CFilterCDNURL overrides the auto-resolved block-dn base URL for
+	// compact filter downloads. When set, CFilterCDNAuto is ignored.
+	CFilterCDNURL string
 }
 
 // Node wraps a neutrino ChainService with additional functionality.
@@ -907,6 +919,37 @@ func (n *Node) runPrefetchPass(workers int) {
 		n.prefetchMu.Unlock()
 	}()
 
+	// Phase 1: Try CDN bulk download if configured.
+	useTor := n.config.TorProxy != ""
+	cdnBaseURL := n.resolveCFilterCDNBaseURL()
+	if cdnBaseURL != "" {
+		cdnImported, cdnLastHeight, cdnErr := n.cdnPrefetchFilters(start, useTor)
+		if cdnErr != nil {
+			n.logger.Warnf("CDN cfilter prefetch error (will fall back to P2P): %v", cdnErr)
+		}
+		if cdnImported > 0 {
+			n.logger.Infof("CDN cfilter prefetch imported %d filters up to height %d",
+				cdnImported, cdnLastHeight)
+		}
+		if cdnLastHeight >= start {
+			n.prefetchMu.Lock()
+			if cdnLastHeight > n.prefetchLastHeight {
+				n.prefetchLastHeight = cdnLastHeight
+			}
+			n.prefetchMu.Unlock()
+			start = cdnLastHeight + 1
+		}
+	}
+
+	// Phase 2: P2P prefetch for remaining blocks.
+	if start > bestBlock.Height {
+		n.logger.Infof("Prefetch complete: all filters obtained via CDN, tip=%d", bestBlock.Height)
+		return
+	}
+
+	p2pTotal := bestBlock.Height - start + 1
+	n.logger.Infof("P2P prefetch: heights %d..%d (%d blocks)", start, bestBlock.Height, p2pTotal)
+
 	type prefetchResult struct {
 		height int32
 		ok     bool
@@ -977,11 +1020,11 @@ func (n *Node) runPrefetchPass(workers int) {
 			bps := float64(scanned) / elapsed.Seconds()
 			remaining := int32(0)
 			if bps > 0 {
-				remaining = int32(float64(total-scanned) / bps)
+				remaining = int32(float64(p2pTotal-scanned) / bps)
 			}
-			pct := float64(scanned) / float64(total) * 100
-			n.logger.Infof("Prefetch progress: %d/%d (%.1f%%) | height %d | %.1f blocks/sec | ~%ds remaining",
-				scanned, total, pct, maxSeen, bps, remaining)
+			pct := float64(scanned) / float64(p2pTotal) * 100
+			n.logger.Infof("P2P prefetch progress: %d/%d (%.1f%%) | height %d | %.1f blocks/sec | ~%ds remaining",
+				scanned, p2pTotal, pct, maxSeen, bps, remaining)
 			lastLog = now
 		}
 	}
@@ -997,8 +1040,296 @@ func (n *Node) runPrefetchPass(workers int) {
 	if elapsed.Seconds() > 0 {
 		bps = float64(scanned) / elapsed.Seconds()
 	}
-	n.logger.Infof("Prefetch complete: %d/%d filters fetched in %s (%.1f blocks/sec), tip=%d",
+	n.logger.Infof("P2P prefetch complete: %d/%d filters fetched in %s (%.1f blocks/sec), tip=%d",
 		succeeded, scanned, elapsed.Round(time.Millisecond), bps, bestBlock.Height)
+}
+
+const (
+	defaultBlockDNStatusTimeout   = 8 * time.Second
+	defaultBlockDNFilterChunkSize = 2000
+)
+
+// blockDNStatus represents the /status response from a block-dn CDN server.
+type blockDNStatus struct {
+	ChainName            string `json:"chain_name"`
+	BestBlockHeight      int32  `json:"best_block_height"`
+	BestFilterHeight     int32  `json:"best_filter_height"`
+	EntriesPerFilterFile int32  `json:"entries_per_filter_file"`
+}
+
+// resolveCFilterCDNBaseURL returns the base URL for cfilter downloads.
+// If CFilterCDNURL is set explicitly, it is returned directly.
+// If CFilterCDNAuto is enabled, the default block-dn URL for the network is
+// returned. Otherwise, an empty string is returned (CDN disabled).
+func (n *Node) resolveCFilterCDNBaseURL() string {
+	if url := strings.TrimSpace(n.config.CFilterCDNURL); url != "" {
+		return strings.TrimRight(url, "/")
+	}
+	if n.config.CFilterCDNAuto {
+		baseURL, _, ok := defaultBlockDNProvider(n.config.Network)
+		if ok {
+			return baseURL
+		}
+	}
+	return ""
+}
+
+// fetchBlockDNStatus fetches and decodes the /status endpoint of a block-dn
+// CDN server. When useTor is true and a Tor proxy is configured, the request
+// is routed through the SOCKS5 proxy.
+func (n *Node) fetchBlockDNStatus(baseURL string, useTor bool) (*blockDNStatus, error) {
+	httpClient := &http.Client{Timeout: defaultBlockDNStatusTimeout}
+
+	if useTor && n.config.TorProxy != "" {
+		torDialer, err := proxy.SOCKS5("tcp", n.config.TorProxy, nil, proxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("create Tor SOCKS5 dialer: %w", err)
+		}
+		httpClient = newTorHTTPClient(torDialer)
+		httpClient.Timeout = defaultBlockDNStatusTimeout
+	}
+
+	statusURL := fmt.Sprintf("%s/status", strings.TrimRight(baseURL, "/"))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, statusURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create status request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status endpoint returned HTTP %d", resp.StatusCode)
+	}
+
+	var status blockDNStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("decode status response: %w", err)
+	}
+
+	return &status, nil
+}
+
+// defaultBlockDNProvider returns the block-dn base URL and expected chain name
+// for the given network. Returns ok=false for unsupported networks.
+func defaultBlockDNProvider(network string) (baseURL, chainName string, ok bool) {
+	switch network {
+	case "mainnet":
+		return "https://block-dn.org", "mainnet", true
+	case "signet":
+		return "https://signet.block-dn.org", "signet", true
+	case "testnet":
+		return "https://testnet3.block-dn.org", "testnet3", true
+	default:
+		return "", "", false
+	}
+}
+
+// parseCFilterChunk parses a block-dn binary cfilter chunk into individual raw
+// filter byte slices. The format is a sequence of CompactSize-varint-prefixed
+// raw GCS filter bytes concatenated together: [varint(len) | filter_bytes]...
+//
+// count is the expected number of filters. If fewer filters are found in the
+// data, the function returns an error.
+func parseCFilterChunk(data []byte, count int) ([][]byte, error) {
+	filters := make([][]byte, 0, count)
+	offset := 0
+
+	for offset < len(data) {
+		filterLen, bytesRead := readCompactSize(data[offset:])
+		if bytesRead == 0 {
+			return nil, fmt.Errorf("invalid CompactSize varint at offset %d", offset)
+		}
+		offset += bytesRead
+
+		if offset+int(filterLen) > len(data) {
+			return nil, fmt.Errorf(
+				"filter at index %d: need %d bytes at offset %d, have %d",
+				len(filters), filterLen, offset, len(data)-offset,
+			)
+		}
+
+		filterData := make([]byte, filterLen)
+		copy(filterData, data[offset:offset+int(filterLen)])
+		filters = append(filters, filterData)
+		offset += int(filterLen)
+	}
+
+	if len(filters) != count {
+		return nil, fmt.Errorf("expected %d filters, got %d", count, len(filters))
+	}
+
+	return filters, nil
+}
+
+// readCompactSize reads a Bitcoin CompactSize unsigned integer from data.
+// Returns the value and number of bytes consumed (0 if data is too short).
+func readCompactSize(data []byte) (uint64, int) {
+	if len(data) == 0 {
+		return 0, 0
+	}
+
+	switch {
+	case data[0] < 0xfd:
+		return uint64(data[0]), 1
+	case data[0] == 0xfd:
+		if len(data) < 3 {
+			return 0, 0
+		}
+		return uint64(data[1]) | uint64(data[2])<<8, 3
+	case data[0] == 0xfe:
+		if len(data) < 5 {
+			return 0, 0
+		}
+		return uint64(data[1]) | uint64(data[2])<<8 |
+			uint64(data[3])<<16 | uint64(data[4])<<24, 5
+	default: // 0xff
+		if len(data) < 9 {
+			return 0, 0
+		}
+		return uint64(data[1]) | uint64(data[2])<<8 |
+			uint64(data[3])<<16 | uint64(data[4])<<24 |
+			uint64(data[5])<<32 | uint64(data[6])<<40 |
+			uint64(data[7])<<48 | uint64(data[8])<<56, 9
+	}
+}
+
+// downloadCFilterChunk downloads a single cfilter chunk from the CDN and
+// imports the filters using ChainService.ImportCFilters.
+func (n *Node) downloadCFilterChunk(httpClient *http.Client, baseURL string, startHeight int32, chunkSize int) (int, error) {
+	url := fmt.Sprintf("%s/filters/%d", baseURL, startHeight)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create request for height %d: %w", startHeight, err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("fetch filters at height %d: %w", startHeight, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("filters endpoint returned HTTP %d for height %d",
+			resp.StatusCode, startHeight)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read filter chunk at height %d: %w", startHeight, err)
+	}
+
+	rawFilters, err := parseCFilterChunk(body, chunkSize)
+	if err != nil {
+		return 0, fmt.Errorf("parse filter chunk at height %d: %w", startHeight, err)
+	}
+
+	imported, err := n.chainService.ImportCFilters(uint32(startHeight), rawFilters)
+	if err != nil {
+		return imported, fmt.Errorf("import filters at height %d: %w", startHeight, err)
+	}
+
+	return imported, nil
+}
+
+// cdnPrefetchFilters downloads and imports compact filters from the block-dn
+// CDN. It determines the available range from the CDN status endpoint, then
+// downloads chunks sequentially, verifying each against locally-stored filter
+// headers. Returns the number of filters imported and the last height processed.
+func (n *Node) cdnPrefetchFilters(startHeight int32, useTor bool) (imported int, lastHeight int32, err error) {
+	baseURL := n.resolveCFilterCDNBaseURL()
+	if baseURL == "" {
+		return 0, startHeight - 1, nil
+	}
+
+	n.logger.Infof("CDN cfilter prefetch: resolving status from %s", baseURL)
+
+	status, err := n.fetchBlockDNStatus(baseURL, useTor)
+	if err != nil {
+		return 0, startHeight - 1, fmt.Errorf("fetch CDN status: %w", err)
+	}
+
+	chunkSize := int(status.EntriesPerFilterFile)
+	if chunkSize <= 0 {
+		chunkSize = defaultBlockDNFilterChunkSize
+	}
+
+	// Determine CDN range: start must be aligned to chunk size.
+	cdnStart := (startHeight / int32(chunkSize)) * int32(chunkSize)
+	if cdnStart < startHeight {
+		cdnStart += int32(chunkSize)
+	}
+
+	// CDN filter height is the last height available.
+	cdnEnd := status.BestFilterHeight
+	if cdnEnd <= 0 {
+		cdnEnd = status.BestBlockHeight
+	}
+	// Align end to chunk boundary (last full chunk).
+	cdnEnd = (cdnEnd / int32(chunkSize)) * int32(chunkSize)
+
+	if cdnStart >= cdnEnd {
+		n.logger.Infof("CDN cfilter prefetch: no chunks available (start=%d, cdn_end=%d)",
+			startHeight, cdnEnd)
+		return 0, startHeight - 1, nil
+	}
+
+	totalChunks := (cdnEnd - cdnStart) / int32(chunkSize)
+	n.logger.Infof("CDN cfilter prefetch: downloading heights %d..%d (%d chunks of %d filters)",
+		cdnStart, cdnEnd+int32(chunkSize)-1, totalChunks, chunkSize)
+
+	// Create HTTP client (Tor-aware if needed).
+	httpClient := &http.Client{Timeout: 2 * time.Minute}
+	if useTor && n.config.TorProxy != "" {
+		torDialer, torErr := proxy.SOCKS5("tcp", n.config.TorProxy, nil, proxy.Direct)
+		if torErr != nil {
+			return 0, startHeight - 1, fmt.Errorf(
+				"create Tor dialer for CDN: %w", torErr,
+			)
+		}
+		httpClient = newTorHTTPClient(torDialer)
+		httpClient.Timeout = 5 * time.Minute // larger timeout for Tor
+	}
+
+	totalImported := 0
+	lastProcessed := startHeight - 1
+	started := time.Now()
+
+	for height := cdnStart; height < cdnEnd; height += int32(chunkSize) {
+		select {
+		case <-n.prefetchQuit:
+			n.logger.Info("CDN cfilter prefetch interrupted")
+			return totalImported, lastProcessed, nil
+		default:
+		}
+
+		chunkImported, chunkErr := n.downloadCFilterChunk(
+			httpClient, baseURL, height, chunkSize,
+		)
+		totalImported += chunkImported
+
+		if chunkErr != nil {
+			n.logger.Warnf("CDN cfilter chunk at height %d failed: %v", height, chunkErr)
+			// Stop CDN prefetch on error; P2P will fill remaining.
+			return totalImported, lastProcessed, chunkErr
+		}
+
+		lastProcessed = height + int32(chunkSize) - 1
+		elapsed := time.Since(started)
+		chunksCompleted := (height-cdnStart)/int32(chunkSize) + 1
+		n.logger.Infof("CDN cfilter prefetch: chunk %d/%d (height %d), %d filters imported, %s elapsed",
+			chunksCompleted, totalChunks, height, totalImported, elapsed.Round(time.Second))
+	}
+
+	elapsed := time.Since(started)
+	n.logger.Infof("CDN cfilter prefetch complete: %d filters imported in %s",
+		totalImported, elapsed.Round(time.Second))
+
+	return totalImported, lastProcessed, nil
 }
 
 // getChainParams returns the chain parameters for the given network.
@@ -1041,4 +1372,16 @@ func getDNSSeeds(network string) []string {
 	default:
 		return []string{}
 	}
+}
+
+// newTorHTTPClient creates an http.Client that routes all requests through the
+// provided SOCKS5 dialer (typically a Tor proxy). This ensures HTTP header
+// downloads do not leak the client's real IP address.
+func newTorHTTPClient(torDialer proxy.Dialer) *http.Client {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return torDialer.Dial(network, addr)
+		},
+	}
+	return &http.Client{Transport: transport}
 }
