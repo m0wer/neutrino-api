@@ -60,6 +60,17 @@ type Config struct {
 	// CFilterCDNURL overrides the auto-resolved block-dn base URL for
 	// compact filter downloads. When set, CFilterCDNAuto is ignored.
 	CFilterCDNURL string
+
+	// AutoSyncWatched enables a background goroutine that incrementally
+	// scans new blocks for watched addresses as they arrive. With this
+	// enabled, the daemon keeps the UTXO set up-to-date for all watched
+	// addresses, allowing clients to query /v1/utxos near-instantly
+	// without explicitly triggering /v1/rescan on every wallet operation.
+	AutoSyncWatched bool
+
+	// AutoSyncInterval controls how often the auto-sync goroutine polls
+	// the chain tip for new blocks. Defaults to 30s when zero.
+	AutoSyncInterval time.Duration
 }
 
 // Node wraps a neutrino ChainService with additional functionality.
@@ -243,6 +254,18 @@ func (n *Node) Start() error {
 
 	// Start sync monitoring goroutine
 	go n.monitorSync()
+
+	// Start the auto-sync goroutine that keeps the UTXO set current for
+	// all watched addresses. This avoids expensive client-driven rescans
+	// on every wallet operation: once the daemon catches up to the chain
+	// tip in the background, /v1/utxos returns instantly.
+	if n.config.AutoSyncWatched {
+		interval := n.config.AutoSyncInterval
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		n.rescanMgr.StartAutoSync(interval)
+	}
 
 	if n.config.PrefetchFilters {
 		go n.prefetchFilters()

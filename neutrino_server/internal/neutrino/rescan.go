@@ -21,6 +21,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino"
+	"github.com/lightninglabs/neutrino/blockntfns"
 )
 
 // RescanManager handles address watching and UTXO scanning.
@@ -40,6 +41,11 @@ type RescanManager struct {
 
 	statusMu sync.RWMutex
 	status   RescanStatus
+
+	// autoSyncQuit signals the auto-sync goroutine to stop. Created lazily
+	// by StartAutoSync; nil when auto-sync is disabled.
+	autoSyncQuit chan struct{}
+	autoSyncDone chan struct{}
 }
 
 // RescanStatus exposes rescan lifecycle details for API consumers.
@@ -126,10 +132,220 @@ func (r *RescanManager) loadPersistedState() {
 
 // Close closes the underlying state store. Call this during shutdown.
 func (r *RescanManager) Close() error {
+	// Stop the auto-sync goroutine first (if running) so it doesn't try to
+	// touch the store after it is closed.
+	if r.autoSyncQuit != nil {
+		close(r.autoSyncQuit)
+		<-r.autoSyncDone
+		r.autoSyncQuit = nil
+	}
 	if r.store != nil {
 		return r.store.Close()
 	}
 	return nil
+}
+
+// shouldAutoSync returns true when the auto-sync goroutine should trigger an
+// incremental rescan. It is a pure function so it can be unit-tested without
+// a live ChainService.
+//
+// Conditions for triggering:
+//   - The chain service reports a sync state of "current" (isCurrent=true).
+//   - At least one address is being watched.
+//   - The chain tip is strictly ahead of the last scanned tip OR no scan has
+//     ever run (lastScannedTip == 0) and watched addresses exist.
+//   - No rescan is already in progress (avoids duplicate concurrent scans).
+func shouldAutoSync(isCurrent bool, watchedCount int,
+	chainTip, lastScannedTip int32, rescanInProgress bool,
+) bool {
+	if !isCurrent || watchedCount == 0 || rescanInProgress {
+		return false
+	}
+	if chainTip <= 0 {
+		return false
+	}
+	return chainTip > lastScannedTip
+}
+
+// StartAutoSync launches a background goroutine that subscribes to block
+// notifications from the chain service and triggers an incremental rescan
+// over all watched addresses whenever new blocks arrive. The goroutine exits
+// when Close is called.
+//
+// The fallbackPollInterval is used while waiting for the chain service to
+// finish initial sync (IsCurrent() == true) before subscribing, and as a
+// safety-net poll if the subscription cannot be established.
+//
+// This method is safe to call only once per RescanManager instance.
+func (r *RescanManager) StartAutoSync(fallbackPollInterval time.Duration) {
+	if fallbackPollInterval <= 0 {
+		fallbackPollInterval = 30 * time.Second
+	}
+	r.autoSyncQuit = make(chan struct{})
+	r.autoSyncDone = make(chan struct{})
+
+	go r.autoSyncLoop(fallbackPollInterval)
+}
+
+func (r *RescanManager) autoSyncLoop(fallbackPollInterval time.Duration) {
+	defer close(r.autoSyncDone)
+
+	r.logger.Info("Auto-sync goroutine started")
+
+	// Phase 1: wait for the chain service to finish initial header/filter
+	// sync before subscribing. Subscribing earlier could deliver a huge
+	// backlog of historical blocks while the node is still catching up.
+	if !r.waitForChainCurrent(fallbackPollInterval) {
+		return
+	}
+
+	// Run an immediate first pass so the daemon catches up to the chain
+	// tip on startup. This is critical: when the daemon restarts after
+	// downtime, watched-address scanning happens here so the first
+	// /v1/utxos query is instant.
+	r.runAutoSyncPass()
+
+	// Phase 2: subscribe to live block notifications. We pass 0 for
+	// bestHeight so we only receive new blocks (no historical backlog --
+	// the catch-up was already done above).
+	src := &neutrino.RescanChainSource{ChainService: r.chainService}
+	sub, err := src.Subscribe(0)
+	if err != nil {
+		r.logger.Warnf("Auto-sync: failed to subscribe to block notifications, falling back to polling every %s: %v",
+			fallbackPollInterval, err)
+		r.fallbackPollLoop(fallbackPollInterval)
+		return
+	}
+	defer sub.Cancel()
+
+	r.logger.Infof("Auto-sync: subscribed to live block notifications (initial scan complete)")
+
+	for {
+		select {
+		case <-r.autoSyncQuit:
+			r.logger.Info("Auto-sync goroutine stopping")
+			return
+		case ntfn, ok := <-sub.Notifications:
+			if !ok {
+				r.logger.Warnf("Auto-sync: block notification channel closed unexpectedly, falling back to polling")
+				r.fallbackPollLoop(fallbackPollInterval)
+				return
+			}
+			r.logger.Debugf("Auto-sync: received block notification at height %d",
+				ntfn.Height())
+			// Drain any additional notifications that arrived together
+			// so we run a single incremental rescan over the whole
+			// batch instead of one per block.
+			r.drainPendingNotifications(sub.Notifications)
+			r.runAutoSyncPass()
+		}
+	}
+}
+
+// waitForChainCurrent polls IsCurrent() until it returns true or the
+// goroutine is asked to quit. Returns true if the chain became current,
+// false if the goroutine should exit.
+func (r *RescanManager) waitForChainCurrent(pollInterval time.Duration) bool {
+	if r.chainService == nil {
+		// No chain service (test harness): just block until quit.
+		<-r.autoSyncQuit
+		return false
+	}
+
+	if r.chainService.IsCurrent() {
+		return true
+	}
+
+	r.logger.Info("Auto-sync: waiting for chain service to finish initial sync...")
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.autoSyncQuit:
+			r.logger.Info("Auto-sync goroutine stopping (chain not yet current)")
+			return false
+		case <-ticker.C:
+			if r.chainService.IsCurrent() {
+				return true
+			}
+		}
+	}
+}
+
+// drainPendingNotifications removes any notifications already queued on the
+// channel without blocking. This batches bursts of block-connected events
+// into a single rescan pass.
+func (r *RescanManager) drainPendingNotifications(ch <-chan blockntfns.BlockNtfn) {
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// fallbackPollLoop is used when block-notification subscription is
+// unavailable. It performs a runAutoSyncPass on every tick.
+func (r *RescanManager) fallbackPollLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.autoSyncQuit:
+			r.logger.Info("Auto-sync goroutine stopping (fallback poll loop)")
+			return
+		case <-ticker.C:
+			r.runAutoSyncPass()
+		}
+	}
+}
+
+// runAutoSyncPass performs a single auto-sync evaluation: if conditions are
+// met, it triggers an incremental rescan over the current watched address set.
+func (r *RescanManager) runAutoSyncPass() {
+	if r.chainService == nil {
+		return
+	}
+
+	isCurrent := r.chainService.IsCurrent()
+	bestBlock, err := r.chainService.BestBlock()
+	if err != nil {
+		r.logger.Debugf("Auto-sync: failed to get best block: %v", err)
+		return
+	}
+
+	r.statusMu.RLock()
+	lastTip := r.status.LastScannedTip
+	r.statusMu.RUnlock()
+
+	watchedCount := r.WatchedAddressCount()
+
+	if !shouldAutoSync(isCurrent, watchedCount, bestBlock.Height, lastTip,
+		r.IsRescanInProgress()) {
+		return
+	}
+
+	startHeight := lastTip + 1
+	if startHeight <= 0 {
+		// No prior scan: fall back to chain tip so we don't trigger a
+		// massive sweep here. The client is expected to issue an
+		// explicit /v1/rescan with the desired lookback when it first
+		// registers a fresh wallet.
+		startHeight = bestBlock.Height
+	}
+
+	r.logger.Infof("Auto-sync: chain advanced to height %d (last scanned %d), running incremental scan over %d watched addresses",
+		bestBlock.Height, lastTip, watchedCount)
+
+	if err := r.Rescan(startHeight, nil); err != nil {
+		r.logger.Warnf("Auto-sync: incremental rescan failed: %v", err)
+	}
 }
 
 // WatchAddress adds an address to the watch list.
@@ -272,7 +488,16 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 
 	r.statusMu.Lock()
 	r.status.LastStarted = time.Now().Unix()
-	r.status.LastStartHeight = startHeight
+	// Preserve the *earliest* start height ever scanned so clients can
+	// correctly determine coverage. Auto-sync passes always start at
+	// (lastTip+1) which is far ahead of the original lookback start;
+	// overwriting LastStartHeight with that value would erase the wallet's
+	// historical coverage record and force a full re-scan on next CLI
+	// invocation. Only widen coverage (lower the recorded start) -- never
+	// narrow it.
+	if r.status.LastStartHeight == 0 || startHeight < r.status.LastStartHeight {
+		r.status.LastStartHeight = startHeight
+	}
 	r.status.LastError = ""
 	r.statusMu.Unlock()
 

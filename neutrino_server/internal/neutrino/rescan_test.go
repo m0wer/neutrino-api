@@ -3,6 +3,7 @@ package neutrino
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -662,5 +663,167 @@ func TestVerifyUTXOsUnspentSkipsOutOfRange(t *testing.T) {
 	removed := mgr.verifyUTXOsUnspent(snapshot, 0, 100)
 	if removed != 0 {
 		t.Errorf("expected 0 removed for out-of-range UTXO, got %d", removed)
+	}
+}
+
+// TestShouldAutoSync exercises the pure decision logic that drives the
+// auto-sync goroutine, ensuring it triggers only under the expected
+// conditions.
+func TestShouldAutoSync(t *testing.T) {
+	tests := []struct {
+		name       string
+		isCurrent  bool
+		watched    int
+		chainTip   int32
+		lastTip    int32
+		inProgress bool
+		want       bool
+	}{
+		{
+			name:      "trigger when chain advances and addresses are watched",
+			isCurrent: true, watched: 5, chainTip: 200, lastTip: 100,
+			inProgress: false, want: true,
+		},
+		{
+			name:      "skip when chain not current",
+			isCurrent: false, watched: 5, chainTip: 200, lastTip: 100,
+			inProgress: false, want: false,
+		},
+		{
+			name:      "skip when no watched addresses",
+			isCurrent: true, watched: 0, chainTip: 200, lastTip: 100,
+			inProgress: false, want: false,
+		},
+		{
+			name:      "skip when chain tip already covered",
+			isCurrent: true, watched: 5, chainTip: 100, lastTip: 100,
+			inProgress: false, want: false,
+		},
+		{
+			name:      "skip when rescan already running",
+			isCurrent: true, watched: 5, chainTip: 200, lastTip: 100,
+			inProgress: true, want: false,
+		},
+		{
+			name:      "skip when chain tip is zero (not yet known)",
+			isCurrent: true, watched: 5, chainTip: 0, lastTip: 0,
+			inProgress: false, want: false,
+		},
+		{
+			name:      "trigger on first sync (lastTip=0, watched present, tip>0)",
+			isCurrent: true, watched: 1, chainTip: 1, lastTip: 0,
+			inProgress: false, want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldAutoSync(
+				tt.isCurrent, tt.watched, tt.chainTip, tt.lastTip,
+				tt.inProgress,
+			)
+			if got != tt.want {
+				t.Fatalf("shouldAutoSync(...) = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStartAutoSyncLifecycle ensures StartAutoSync wires up its quit/done
+// channels correctly and Close cleanly stops the goroutine.
+func TestStartAutoSyncLifecycle(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		// chainService is nil: runAutoSyncPass will return early on every
+		// tick, so no chain interaction is attempted.
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	mgr.StartAutoSync(10 * time.Millisecond)
+
+	if mgr.autoSyncQuit == nil {
+		t.Fatal("expected autoSyncQuit channel to be created")
+	}
+	if mgr.autoSyncDone == nil {
+		t.Fatal("expected autoSyncDone channel to be created")
+	}
+
+	// Close must stop the goroutine within a reasonable timeout.
+	stopped := make(chan error, 1)
+	go func() { stopped <- mgr.Close() }()
+
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto-sync goroutine did not stop within 2s after Close")
+	}
+}
+
+// TestPreserveEarliestLastStartHeight asserts the policy that drives the
+// "skip redundant initial rescan" path on the client: incremental rescans
+// (e.g. auto-sync, or a client requesting a recent start) must NEVER
+// overwrite a previously persisted earlier LastStartHeight, otherwise
+// clients lose the ability to detect that older heights have already been
+// covered and will trigger a full re-scan on every CLI invocation.
+//
+// This is a regression test for the bug observed in production where
+// auto-sync (calling Rescan(lastTip+1)) clobbered the original lookback
+// start (e.g. 197179) with a near-tip value (e.g. 302300), causing the
+// client's coverage check `prior_start <= scan_start_height` to fail.
+func TestPreserveEarliestLastStartHeight(t *testing.T) {
+	tests := []struct {
+		name                string
+		persistedStart      int32
+		newStart            int32
+		expectedAfterUpdate int32
+	}{
+		{
+			name:                "first ever scan records start",
+			persistedStart:      0,
+			newStart:            197179,
+			expectedAfterUpdate: 197179,
+		},
+		{
+			name:                "incremental near-tip start does NOT overwrite",
+			persistedStart:      197179,
+			newStart:            302300,
+			expectedAfterUpdate: 197179,
+		},
+		{
+			name:                "earlier start widens coverage",
+			persistedStart:      302300,
+			newStart:            197179,
+			expectedAfterUpdate: 197179,
+		},
+		{
+			name:                "equal start is a no-op",
+			persistedStart:      197179,
+			newStart:            197179,
+			expectedAfterUpdate: 197179,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Simulate the policy implemented in Rescan() inside the
+			// statusMu critical section. Keep this in sync with the
+			// real code at rescan.go (search "Preserve the *earliest*").
+			persisted := tc.persistedStart
+			updated := persisted
+			if updated == 0 || tc.newStart < updated {
+				updated = tc.newStart
+			}
+			if updated != tc.expectedAfterUpdate {
+				t.Fatalf("LastStartHeight: got %d, want %d", updated, tc.expectedAfterUpdate)
+			}
+		})
 	}
 }

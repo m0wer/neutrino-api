@@ -44,6 +44,8 @@ func main() {
 	clearnetInitialSync := flag.Bool("clearnet-initial-sync", getEnvBool("CLEARNET_INITIAL_SYNC", true), "Sync block headers over clearnet before switching to Tor (safe: headers are public data)")
 	cfilterCDNAuto := flag.Bool("cfilter-cdn-auto", getEnvBool("CFILTER_CDN_AUTO", true), "Enable automatic compact filter download from block-dn CDN after P2P header sync")
 	cfilterCDNURL := flag.String("cfilter-cdn-url", getEnv("CFILTER_CDN_URL", ""), "Override block-dn base URL for compact filter CDN downloads")
+	autoSyncWatched := flag.Bool("auto-sync-watched", getEnvBool("AUTO_SYNC_WATCHED", true), "Continuously scan new blocks for watched addresses in the background, keeping the UTXO set up-to-date so /v1/utxos is instant")
+	autoSyncIntervalSec := flag.Int("auto-sync-interval", getEnvInt("AUTO_SYNC_INTERVAL_SEC", 30), "Seconds between auto-sync polling passes for new blocks (only used when --auto-sync-watched is enabled)")
 	noAuth := flag.Bool("no-auth", getEnvBool("NO_AUTH", false), "Disable TLS and token authentication (for development/regtest)")
 	resetAuth := flag.Bool("reset-auth", false, "Regenerate TLS cert and auth token, clear watched addresses, then exit")
 	showVersion := flag.Bool("version", false, "Show version and exit")
@@ -127,6 +129,8 @@ func main() {
 		ClearnetInitialSync: *clearnetInitialSync,
 		CFilterCDNAuto:      *cfilterCDNAuto,
 		CFilterCDNURL:       *cfilterCDNURL,
+		AutoSyncWatched:     *autoSyncWatched,
+		AutoSyncInterval:    time.Duration(*autoSyncIntervalSec) * time.Second,
 		Logger:              backend,
 		LogLevel:            *logLevel,
 	}

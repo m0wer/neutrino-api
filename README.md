@@ -100,6 +100,8 @@ Anyone can reproduce and verify a release locally with one command:
 | `CLEARNET_INITIAL_SYNC` | `true` | When `TOR_PROXY` is set, perform initial public header sync over clearnet before switching to Tor |
 | `CFILTER_CDN_AUTO` | `true` | Auto-download compact filters from block-dn CDN after P2P header sync (verified against filter headers) |
 | `CFILTER_CDN_URL` | | Override block-dn base URL for compact filter CDN downloads |
+| `AUTO_SYNC_WATCHED` | `true` | Continuously scan new blocks for watched addresses in the background, keeping the UTXO set up-to-date so `/v1/utxos` is instant. Reacts to block-connected notifications from the chain service in real time |
+| `AUTO_SYNC_INTERVAL_SEC` | `30` | Fallback poll interval (in seconds) used while waiting for initial header sync, and as a safety net if block-notification subscription is unavailable. Only used when `AUTO_SYNC_WATCHED=true` |
 | `MAX_PEERS` | `8` | Maximum number of peers to connect to |
 | `NO_AUTH` | `false` | Disable TLS and token authentication (for development/regtest) |
 
@@ -298,6 +300,13 @@ curl -X POST http://localhost:8334/v1/utxos \
   -H "Content-Type: application/json" \
   -d '{"addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"]}'
 ```
+
+> **Note:** When `AUTO_SYNC_WATCHED=true` (the default), the daemon
+> subscribes to block-connected notifications and incrementally scans
+> every new block for all watched addresses in the background. After
+> the initial rescan, subsequent `/v1/utxos` queries return immediately
+> without requiring another `/v1/rescan` — the daemon stays caught up
+> in real time and also re-syncs on every restart.
 
 Response:
 ```json

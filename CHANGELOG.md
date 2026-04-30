@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Preserve earliest `last_start_height` across incremental rescans.**
+  Previously, every call to `Rescan()` (including auto-sync passes that
+  start at `last_scanned_tip + 1`) overwrote the persisted
+  `last_start_height` with the most recent invocation's start. This
+  destroyed the wallet's coverage record on disk: clients use
+  `last_start_height` together with `last_scanned_tip` to decide whether
+  the daemon has already scanned the requested lookback window and skip
+  redundant full rescans. The bug forced a full re-scan on every CLI
+  invocation, which manifested as a ~12 s rescan even when the daemon
+  had already scanned the entire requested range. `LastStartHeight` is
+  now only lowered (when the new start is earlier or no scan has ever
+  run); incremental scans no longer narrow the recorded coverage.
+
+### Added
+
+- **Continuous background sync of watched addresses (`AUTO_SYNC_WATCHED`).**
+  The daemon now subscribes to block-connected notifications from the chain
+  service and incrementally scans every new block for all watched addresses
+  in the background, keeping the persisted UTXO set up-to-date in real time.
+  After the initial `/v1/rescan`, subsequent `/v1/utxos` queries return
+  immediately without requiring clients to re-trigger a rescan, and the
+  daemon also catches up on every restart so wallet startup is instant
+  even after extended downtime.
+  - New config: `AUTO_SYNC_WATCHED` / `--auto-sync-watched` (default: `true`)
+    enables the auto-sync goroutine.
+  - New config: `AUTO_SYNC_INTERVAL_SEC` / `--auto-sync-interval` (default:
+    `30`) sets the fallback poll interval used while waiting for initial
+    header sync and as a safety net if block-notification subscription is
+    unavailable.
+  - Auto-sync skips when a manual rescan is already running and only starts
+    after the chain service reports `IsCurrent() == true` to avoid scanning
+    against an incomplete header chain.
+
 ## [1.1.0] - 2026-04-09
 
 ### Changed
