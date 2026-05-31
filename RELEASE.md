@@ -57,13 +57,16 @@ git push origin v1.0.0
 The GitHub Actions workflow will automatically:
 
 1. **Build Binaries** for:
-   - Linux (amd64, arm64)
+   - Linux (amd64, 386, arm64, armv7, armv6)
    - macOS (amd64, arm64)
-   - Windows (amd64)
+   - Windows (amd64, arm64)
 
 2. **Build Docker Images** for:
    - linux/amd64
+   - linux/386
    - linux/arm64
+   - linux/arm/v7
+   - linux/arm/v6
 
 3. **Create GitHub Release** with:
    - All binaries

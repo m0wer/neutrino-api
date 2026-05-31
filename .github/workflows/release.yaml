@@ -80,8 +80,19 @@ jobs:
             goarch: amd64
             output: neutrinod-linux-amd64
           - goos: linux
+            goarch: 386
+            output: neutrinod-linux-386
+          - goos: linux
             goarch: arm64
             output: neutrinod-linux-arm64
+          - goos: linux
+            goarch: arm
+            goarm: 7
+            output: neutrinod-linux-armv7
+          - goos: linux
+            goarch: arm
+            goarm: 6
+            output: neutrinod-linux-armv6
           - goos: darwin
             goarch: amd64
             output: neutrinod-darwin-amd64
@@ -91,6 +102,9 @@ jobs:
           - goos: windows
             goarch: amd64
             output: neutrinod-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            output: neutrinod-windows-arm64.exe
 
     steps:
       - name: Checkout
@@ -115,6 +129,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: 0
           SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
         run: |
@@ -174,7 +189,7 @@ jobs:
         with:
           context: ./neutrino_server
           file: ./neutrino_server/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

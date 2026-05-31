@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add a production-ready `systemd` service example in README for running the
+  `neutrinod` binary directly on Linux hosts (including Raspberry Pi), with a
+  signet-oriented configuration example.
+
+### Changed
+
+- Docker image publishing now includes `linux/386`, `linux/arm/v7`, and
+  `linux/arm/v6` in addition to `linux/amd64` and `linux/arm64`, expanding
+  compatibility to 32-bit x86 and broader 32-bit ARM Linux systems.
+- Release binary matrix now includes `linux-386`, `linux-armv7`,
+  `linux-armv6`, and `windows-arm64` artifacts in addition to the previous
+  `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`, and
+  `windows-amd64` outputs.
+- README now documents a signet Docker run example using
+  `LISTEN_ADDR=0.0.0.0:38334` and host port mapping `38334:38334`.
+
 ## [1.2.0] - 2026-04-30
 
 ### Fixed

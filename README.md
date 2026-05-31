@@ -8,7 +8,7 @@ A standalone REST API server for [Neutrino](https://github.com/lightninglabs/neu
 - **Lightweight**: No need to download full blockchain, only block headers and compact filters
 - **REST API**: Simple HTTP endpoints for blockchain queries, transaction broadcasting, and UTXO scanning
 - **Multi-Network**: Support for mainnet, testnet, regtest, and signet
-- **Docker Support**: Easy deployment with Docker and docker-compose
+- **Docker Support**: Easy deployment with Docker and docker-compose (linux/amd64, linux/386, linux/arm64, linux/arm/v7, linux/arm/v6)
 - **Production Ready**: Includes health checks, graceful shutdown, and comprehensive logging
 
 ## Quick Start
@@ -46,6 +46,16 @@ docker run -d \
   -e ADD_PEERS=bitcoin-node:18444 \
   -e LOG_LEVEL=debug \
   -e NO_AUTH=true \
+  ghcr.io/m0wer/neutrino-api:1
+
+# Run for signet (using conventional signet API port 38334)
+docker run -d \
+  -p 38334:38334 \
+  -v neutrino-signet-data:/data/neutrino \
+  -e NETWORK=signet \
+  -e LISTEN_ADDR=0.0.0.0:38334 \
+  -e LOG_LEVEL=info \
+  -e ADD_PEERS=bitcoin.sgn.space:38333 \
   ghcr.io/m0wer/neutrino-api:1
 ```
 
@@ -92,7 +102,7 @@ Anyone can reproduce and verify a release locally with one command:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NETWORK` | `mainnet` | Bitcoin network (mainnet, testnet, regtest, signet) |
-| `LISTEN_ADDR` | `0.0.0.0:8334` | REST API listen address |
+| `LISTEN_ADDR` | `0.0.0.0:8334` | REST API listen address (for signet, `0.0.0.0:38334` is a common convention) |
 | `DATA_DIR` | `/data/neutrino` | Data directory for headers and filters |
 | `LOG_LEVEL` | `info` | Log level (trace, debug, info, warn, error) |
 | `ADD_PEERS` | | Comma-separated list of preferred peers (e.g., `node1:8333,node2:8333`) while still allowing peer discovery |
@@ -450,6 +460,47 @@ services:
 
 volumes:
   neutrino-data:
+```
+
+### systemd Service Example (binary install)
+
+If you run the standalone binary directly on a host (including Raspberry Pi),
+this unit file starts `neutrinod` at boot and restarts it on failures:
+
+```ini
+# /etc/systemd/system/neutrinod.service
+[Unit]
+Description=Neutrino API daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=neutrino
+Group=neutrino
+Environment=NETWORK=signet
+Environment=LISTEN_ADDR=0.0.0.0:38334
+Environment=DATA_DIR=/var/lib/neutrinod
+Environment=LOG_LEVEL=info
+Environment=ADD_PEERS=bitcoin.sgn.space:38333
+ExecStart=/usr/local/bin/neutrinod --network=${NETWORK} --listen=${LISTEN_ADDR} --datadir=${DATA_DIR} --loglevel=${LOG_LEVEL} --addpeer=${ADD_PEERS}
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/neutrinod
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo useradd --system --home /var/lib/neutrinod --shell /usr/sbin/nologin neutrino
+sudo mkdir -p /var/lib/neutrinod
+sudo chown -R neutrino:neutrino /var/lib/neutrinod
+sudo systemctl daemon-reload
+sudo systemctl enable --now neutrinod
 ```
 
 **Note:** TLS and API token authentication are enabled by default. After first start, find the auth token in the data volume at `auth_token` and the TLS certificate at `tls.cert`. Clients must use HTTPS and include `Authorization: Bearer <token>`.
