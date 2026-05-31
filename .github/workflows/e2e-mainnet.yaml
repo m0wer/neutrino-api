@@ -33,7 +33,7 @@ concurrency:
 jobs:
   e2e-mainnet:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v6.0.2

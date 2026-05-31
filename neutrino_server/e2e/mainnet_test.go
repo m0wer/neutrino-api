@@ -28,6 +28,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -164,19 +165,36 @@ func TestMainnetE2E(t *testing.T) {
 	defer func() {
 		t.Log("Stopping server...")
 		if cmd.Process != nil {
-			cmd.Process.Signal(syscall.SIGTERM)
-			// Wait with timeout
 			done := make(chan error, 1)
 			go func() {
 				done <- cmd.Wait()
 			}()
+
+			if err := signalServerProcessGroup(cmd, syscall.SIGTERM); err != nil {
+				t.Logf("Failed to send SIGTERM: %v", err)
+			}
+
 			select {
-			case <-done:
+			case err := <-done:
+				if err != nil {
+					t.Logf("Server exited with error: %v", err)
+				}
 				t.Log("Server stopped gracefully")
 			case <-time.After(5 * time.Second):
 				t.Log("Server did not stop gracefully, killing...")
-				cmd.Process.Kill()
-				cmd.Wait()
+				if err := signalServerProcessGroup(cmd, syscall.SIGKILL); err != nil {
+					t.Logf("Failed to send SIGKILL: %v", err)
+					return
+				}
+
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Logf("Server exited with error after SIGKILL: %v", err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Log("Server did not exit within 5s after SIGKILL")
+				}
 			}
 		}
 	}()
@@ -297,6 +315,7 @@ func startServer(ctx context.Context, t *testing.T, binaryPath, dataDir, listenA
 	// Redirect output to test logs
 	cmd.Stdout = &testLogWriter{t: t, prefix: "[SERVER] "}
 	cmd.Stderr = &testLogWriter{t: t, prefix: "[SERVER] "}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Failed to start server: %v", err)
@@ -304,6 +323,19 @@ func startServer(ctx context.Context, t *testing.T, binaryPath, dataDir, listenA
 
 	t.Logf("Server started with PID: %d", cmd.Process.Pid)
 	return cmd
+}
+
+func signalServerProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+
+	// Signal the entire process group so any child processes do not outlive the parent.
+	if err := syscall.Kill(-cmd.Process.Pid, sig); err == nil || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+
+	return cmd.Process.Signal(sig)
 }
 
 // testLogWriter writes to test logs with a prefix
