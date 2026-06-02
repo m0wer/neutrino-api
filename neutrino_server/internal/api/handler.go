@@ -32,6 +32,12 @@ type NodeInterface interface {
 	Rescan(startHeight int32, addresses []string) error
 	IsRescanInProgress() bool
 	RescanStatus() neutrino.RescanStatus
+
+	// Mempool — return zero values when the tracker is disabled.
+	GetMempoolUTXOs(addresses []string) []neutrino.MempoolUTXO
+	GetMempoolSpend(txid string, vout uint32) (neutrino.MempoolSpend, bool)
+	GetMempoolTx(txid string) (*wire.MsgTx, bool)
+	MempoolStats() neutrino.MempoolStats
 }
 
 // Handler provides REST API endpoints for the neutrino node.
@@ -210,10 +216,25 @@ func (h *Handler) handleGetTransaction(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	txid := vars["txid"]
 
-	// Neutrino doesn't store full transactions by default
-	// This would require fetching from a peer or having received it
+	// Mempool tracker holds the full tx for every watched unconfirmed
+	// entry; serve those without needing a block download.
+	if tx, ok := h.node.GetMempoolTx(txid); ok {
+		var buf bytes.Buffer
+		if err := tx.Serialize(&buf); err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to serialize transaction")
+			return
+		}
+		h.jsonResponse(w, map[string]any{
+			"txid":    txid,
+			"hex":     hex.EncodeToString(buf.Bytes()),
+			"mempool": true,
+		})
+		return
+	}
+
+	// Confirmed-tx lookup is unimplemented — neutrino doesn't store full
+	// blocks/txs by default.
 	h.errorResponse(w, http.StatusNotImplemented, "transaction lookup requires full block download")
-	_ = txid
 }
 
 // Broadcast transaction endpoint
@@ -255,7 +276,8 @@ func (h *Handler) handleBroadcastTransaction(w http.ResponseWriter, r *http.Requ
 // UTXOs endpoint
 func (h *Handler) handleGetUTXOs(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Addresses []string `json:"addresses"`
+		Addresses      []string `json:"addresses"`
+		IncludeMempool *bool    `json:"include_mempool,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -269,9 +291,45 @@ func (h *Handler) handleGetUTXOs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// include_mempool defaults to true; clients opt out by sending false.
+	includeMempool := true
+	if req.IncludeMempool != nil {
+		includeMempool = *req.IncludeMempool
+	}
+
+	if includeMempool {
+		mempoolUTXOs := h.node.GetMempoolUTXOs(req.Addresses)
+		// Drop confirmed UTXOs that the mempool tracker hasn't yet
+		// evicted post-confirmation: a (txid,vout) appearing in both
+		// sets is the confirmed copy. Keying on "txid:vout" preserves
+		// the confirmed entry (Height>=1) over the mempool sentinel.
+		seen := make(map[string]struct{}, len(utxos))
+		for _, u := range utxos {
+			seen[utxoKey(u.TxID, u.Vout)] = struct{}{}
+		}
+		for _, mu := range mempoolUTXOs {
+			if _, ok := seen[utxoKey(mu.TxID, mu.Vout)]; ok {
+				continue
+			}
+			utxos = append(utxos, neutrino.UTXO{
+				TxID:         mu.TxID,
+				Vout:         mu.Vout,
+				Value:        mu.Value,
+				Address:      mu.Address,
+				ScriptPubKey: mu.ScriptPubKey,
+				Height:       0, // mempool sentinel
+			})
+		}
+	}
+
 	h.jsonResponse(w, map[string]any{
 		"utxos": utxos,
 	})
+}
+
+// utxoKey builds the dedup key used when merging confirmed and mempool UTXOs.
+func utxoKey(txid string, vout uint32) string {
+	return txid + ":" + strconv.FormatUint(uint64(vout), 10)
 }
 
 // UTXO lookup endpoint
@@ -315,6 +373,32 @@ func (h *Handler) handleGetUTXO(w http.ResponseWriter, r *http.Request) {
 			h.errorResponse(w, http.StatusInternalServerError, err.Error())
 		}
 		return
+	}
+
+	// include_mempool defaults to true; clients opt out with ?include_mempool=false.
+	includeMempool := true
+	if v := r.URL.Query().Get("include_mempool"); v != "" {
+		if parsed, perr := strconv.ParseBool(v); perr == nil {
+			includeMempool = parsed
+		}
+	}
+
+	// If the UTXO is reported unspent on-chain but a mempool spend exists,
+	// surface it via dedicated mempool fields without overwriting confirmed
+	// state. Confirmed-spend wins over mempool-spend.
+	if includeMempool && report.Unspent {
+		if spend, ok := h.node.GetMempoolSpend(txid, uint32(vout)); ok {
+			h.jsonResponse(w, map[string]any{
+				"unspent":                  report.Unspent,
+				"value":                    report.Value,
+				"scriptpubkey":             report.ScriptPubKey,
+				"block_height":             report.BlockHeight,
+				"mempool_spending_txid":    spend.SpendingTxID,
+				"mempool_spending_input":   spend.InputIndex,
+				"mempool_spend_first_seen": spend.FirstSeen,
+			})
+			return
+		}
 	}
 
 	h.jsonResponse(w, report)

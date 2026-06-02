@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Watched-only mempool tracker (`MEMPOOL_ENABLED`).** The daemon now
+  subscribes to every connected peer's incoming P2P messages, fetches each
+  announced transaction, and records the ones that pay or spend a watched
+  address. Unconfirmed UTXOs are surfaced in the existing `/v1/utxos`
+  endpoint with `height: 0`, unconfirmed spends are overlaid on
+  `/v1/utxo/{txid}/{vout}` via new `mempool_*` fields, and watched mempool
+  txs can be fetched verbatim from a new `/v1/tx/{txid}` endpoint. Tracker
+  state is in-memory only; after each successful rescan pass it evicts
+  precisely the entries that just confirmed on-chain (rather than wiping
+  the whole view, which would drop still-unconfirmed entries because
+  mempool peers do not reliably re-announce already-acked txs). A 14-day
+  TTL sweeps stale entries; RBF replacements automatically evict the
+  prior entry.
+  - New config: `MEMPOOL_ENABLED` / `--mempool` (default: `true`) toggles
+    the tracker.
+  - New request flag: `include_mempool` on `/v1/utxos` (request body) and
+    on `/v1/utxo/{txid}/{vout}` (query string), default `true`. Set to
+    `false` to receive only the chain-only view.
+  - `/v1/status` gains `mempool_enabled` and (when enabled) a `mempool`
+    object reporting tracker counts (`entries`, `utxos`, `spends`,
+    `peers`).
+  - Privacy model: the daemon asks every peer for every announced tx
+    rather than only those matching a local heuristic, so peers cannot
+    learn which addresses the operator cares about. The bandwidth cost
+    is small because we only fetch the tx body once per inv (deduped by
+    txid across peers) and discard txs that don't touch a watched
+    script. Backed by a fork patch on `lightninglabs/neutrino` that
+    stops dropping `MSG_TX` advertisements when the local node hasn't
+    asked the peer to relay txs.
 - Add a production-ready `systemd` service example in README for running the
   `neutrinod` binary directly on Linux hosts (including Raspberry Pi), with a
   signet-oriented configuration example.
@@ -24,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `windows-amd64` outputs.
 - README now documents a signet Docker run example using
   `LISTEN_ADDR=0.0.0.0:38334` and host port mapping `38334:38334`.
+- Bump the `lightninglabs/neutrino` fork to
+  `0d5f911` (`m0wer/neutrino`), which gates the relaxed `MSG_TX`
+  relay behaviour behind the new `Config.MempoolEnabled` flag instead
+  of unconditionally enabling it.
 
 ## [1.2.0] - 2026-04-30
 

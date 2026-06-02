@@ -71,6 +71,13 @@ type Config struct {
 	// AutoSyncInterval controls how often the auto-sync goroutine polls
 	// the chain tip for new blocks. Defaults to 30s when zero.
 	AutoSyncInterval time.Duration
+
+	// MempoolEnabled enables watched-only mempool tracking. When true, the
+	// neutrino fork is configured to relay tx invs from peers, and a
+	// MempoolTracker subscribes to per-peer messages, fetches every
+	// announced transaction, and matches it against watched scripts and
+	// outpoints from the RescanManager. Defaults to true.
+	MempoolEnabled bool
 }
 
 // Node wraps a neutrino ChainService with additional functionality.
@@ -80,6 +87,9 @@ type Node struct {
 	chainParams  *chaincfg.Params
 	chainService *neutrino.ChainService
 	rescanMgr    *RescanManager
+	mempool      *MempoolTracker
+	mempoolCtx   context.Context
+	mempoolStop  context.CancelFunc
 	logger       btclog.Logger
 	db           walletdb.DB
 
@@ -115,12 +125,14 @@ type Transaction struct {
 
 // Status represents the current node status.
 type Status struct {
-	Synced           bool   `json:"synced"`
-	BlockHeight      int32  `json:"block_height"`
-	FilterHeight     int32  `json:"filter_height"`
-	Peers            int    `json:"peers"`
-	Version          string `json:"version"`
-	WatchedAddresses int    `json:"watched_addresses"`
+	Synced           bool          `json:"synced"`
+	BlockHeight      int32         `json:"block_height"`
+	FilterHeight     int32         `json:"filter_height"`
+	Peers            int           `json:"peers"`
+	Version          string        `json:"version"`
+	WatchedAddresses int           `json:"watched_addresses"`
+	MempoolEnabled   bool          `json:"mempool_enabled"`
+	Mempool          *MempoolStats `json:"mempool,omitempty"`
 }
 
 // NewNode creates a new neutrino node.
@@ -267,6 +279,23 @@ func (n *Node) Start() error {
 		n.rescanMgr.StartAutoSync(interval)
 	}
 
+	// Start the watched-only mempool tracker. It subscribes to per-peer
+	// messages, fetches every announced tx, and keeps an in-memory view
+	// of unconfirmed UTXOs/spends matching the watched address set.
+	if n.config.MempoolEnabled {
+		n.mempool = NewMempoolTracker(n.chainService, n.rescanMgr, n.logger)
+		n.rescanMgr.SetMempoolTracker(n.mempool)
+		n.mempoolCtx, n.mempoolStop = context.WithCancel(context.Background())
+		if err := n.mempool.Start(n.mempoolCtx); err != nil {
+			n.logger.Warnf("Mempool tracker failed to start: %v", err)
+			n.mempool = nil
+			n.mempoolStop()
+			n.mempoolStop = nil
+		} else {
+			n.logger.Info("Mempool tracker started")
+		}
+	}
+
 	if n.config.PrefetchFilters {
 		go n.prefetchFilters()
 	}
@@ -286,6 +315,7 @@ func (n *Node) startChainService(useTor bool) error {
 		ChainParams:     *n.chainParams,
 		FilterCacheSize: uint64(n.config.FilterCacheSize),
 		PersistToDisk:   true,
+		MempoolEnabled:  n.config.MempoolEnabled,
 	}
 
 	// Add preferred peers if specified (discovery remains enabled).
@@ -449,6 +479,15 @@ func (n *Node) waitForHeaderSync() error {
 func (n *Node) Stop() error {
 	n.logger.Info("Stopping neutrino node...")
 
+	// Stop the mempool tracker before tearing down the chain service so
+	// it can drain its in-flight peer subscriptions cleanly.
+	if n.mempool != nil {
+		if n.mempoolStop != nil {
+			n.mempoolStop()
+		}
+		n.mempool.Stop()
+	}
+
 	// Close rescan manager first (persists final state and closes state DB).
 	if n.rescanMgr != nil {
 		if err := n.rescanMgr.Close(); err != nil {
@@ -492,6 +531,12 @@ func (n *Node) GetStatus() Status {
 		watchedAddresses = n.rescanMgr.WatchedAddressCount()
 	}
 
+	var mempoolStats *MempoolStats
+	if n.mempool != nil {
+		s := n.mempool.Stats()
+		mempoolStats = &s
+	}
+
 	return Status{
 		Synced:           n.synced,
 		BlockHeight:      n.blockHeight,
@@ -499,6 +544,8 @@ func (n *Node) GetStatus() Status {
 		Peers:            peers,
 		Version:          n.version,
 		WatchedAddresses: watchedAddresses,
+		MempoolEnabled:   n.config != nil && n.config.MempoolEnabled,
+		Mempool:          mempoolStats,
 	}
 }
 
@@ -554,6 +601,44 @@ func (n *Node) GetUTXOs(addresses []string) ([]UTXO, error) {
 	}
 
 	return n.rescanMgr.GetUTXOs(addresses)
+}
+
+// GetMempoolUTXOs returns watched-only mempool UTXOs for the given
+// addresses. Returns nil when the mempool tracker is disabled.
+func (n *Node) GetMempoolUTXOs(addresses []string) []MempoolUTXO {
+	if n.mempool == nil {
+		return nil
+	}
+	return n.mempool.MempoolUTXOsForAddresses(addresses)
+}
+
+// GetMempoolSpend returns the unconfirmed spend of (txid, vout) when one
+// exists in the mempool. The bool result is false when the tracker is
+// disabled or no such spend is known.
+func (n *Node) GetMempoolSpend(txid string, vout uint32) (MempoolSpend, bool) {
+	if n.mempool == nil {
+		return MempoolSpend{}, false
+	}
+	return n.mempool.MempoolSpendOf(txid, vout)
+}
+
+// GetMempoolTx returns the watched mempool transaction with the given txid,
+// when one is currently tracked. The bool result is false when the tracker
+// is disabled or the tx is not tracked.
+func (n *Node) GetMempoolTx(txid string) (*wire.MsgTx, bool) {
+	if n.mempool == nil {
+		return nil, false
+	}
+	return n.mempool.MempoolTxByID(txid)
+}
+
+// MempoolStats returns counters for the mempool tracker. Returns the zero
+// value when the tracker is disabled.
+func (n *Node) MempoolStats() MempoolStats {
+	if n.mempool == nil {
+		return MempoolStats{}
+	}
+	return n.mempool.Stats()
 }
 
 // WatchAddress adds an address to the watch list.

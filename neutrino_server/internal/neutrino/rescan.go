@@ -46,6 +46,11 @@ type RescanManager struct {
 	// by StartAutoSync; nil when auto-sync is disabled.
 	autoSyncQuit chan struct{}
 	autoSyncDone chan struct{}
+
+	// mempool is an optional reference to the watched-mempool tracker.
+	// Set via SetMempoolTracker; nil when mempool tracking is disabled.
+	// Guarded by mu (write on Set, read in notifyMempoolPostScan).
+	mempool *MempoolTracker
 }
 
 // RescanStatus exposes rescan lifecycle details for API consumers.
@@ -520,11 +525,13 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 		r.status.LastScannedTip = bestBlock.Height
 		r.statusMu.Unlock()
 		r.persistState()
+		// No blocks were scanned, so nothing in the watched mempool
+		// view could have just confirmed: leave it intact.
 		return nil
 	}
 
 	// Scan blocks from effectiveStart to bestBlock.Height
-	err = r.scanBlocks(effectiveStart, bestBlock.Height, addrs)
+	confirmedTxids, err := r.scanBlocks(effectiveStart, bestBlock.Height, addrs)
 	r.statusMu.Lock()
 	r.status.LastFinished = time.Now().Unix()
 	r.status.LastScannedTip = bestBlock.Height
@@ -535,6 +542,15 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 
 	// Persist state after rescan completes (even on error, persist what we have).
 	r.persistState()
+
+	// After a successful pass, evict mempool entries that just confirmed.
+	// Use the precise set surfaced by scanBlocks rather than EvictAll so
+	// that still-unconfirmed tracked txs survive: mempool peers do not
+	// reliably re-announce txs we have already acked, so a wholesale wipe
+	// would silently drop tracked entries until they confirm.
+	if err == nil && len(confirmedTxids) > 0 {
+		r.notifyMempoolConfirmed(confirmedTxids)
+	}
 
 	return err
 }
@@ -571,7 +587,14 @@ func (r *RescanManager) persistState() {
 }
 
 // scanBlocks scans blocks in the given range for transactions matching the addresses.
-func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil.Address) error {
+// scanBlocks scans the [startHeight, endHeight] range for transactions
+// touching any of the supplied addresses. It returns the set of txids
+// observed in matched blocks so callers can evict matching mempool entries.
+// Note that the returned slice is over-eager: it includes every txid in any
+// matched block, not only the ones that paid/spent a watched script. This
+// is safe because consumers (MempoolTracker.EvictConfirmed) only act on
+// txids they already track and silently ignore the rest.
+func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil.Address) ([]string, error) {
 	totalBlocks := endHeight - startHeight + 1
 	r.logger.Infof("Scanning blocks %d to %d (%d blocks) for %d addresses",
 		startHeight, endHeight, totalBlocks, len(addrs))
@@ -590,11 +613,15 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 	}
 
 	if len(scripts) == 0 {
-		return errors.New("no valid scripts to scan for")
+		return nil, errors.New("no valid scripts to scan for")
 	}
 
 	// Track spent outputs to remove from UTXO set
 	spentOutputs := make(map[string]bool)
+	// confirmedTxids collects every txid in any matched block, surfaced
+	// to callers so a mempool tracker can evict precisely the entries
+	// that just confirmed (instead of wiping its whole view).
+	confirmedTxids := make([]string, 0)
 	foundUTXOs := make(map[string]UTXO)
 
 	// Progress tracking
@@ -705,6 +732,7 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 
 		for _, tx := range block.Transactions() {
 			txHash := tx.Hash().String()
+			confirmedTxids = append(confirmedTxids, txHash)
 
 			for _, txIn := range tx.MsgTx().TxIn {
 				prevOut := txIn.PreviousOutPoint
@@ -781,7 +809,7 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 		r.logger.Infof("Spend verification removed %d additional spent UTXOs", verifiedSpent)
 	}
 
-	return nil
+	return confirmedTxids, nil
 }
 
 // verifyUTXOsUnspent performs a per-UTXO spend check for all UTXOs in the

@@ -112,6 +112,7 @@ Anyone can reproduce and verify a release locally with one command:
 | `CFILTER_CDN_URL` | | Override block-dn base URL for compact filter CDN downloads |
 | `AUTO_SYNC_WATCHED` | `true` | Continuously scan new blocks for watched addresses in the background, keeping the UTXO set up-to-date so `/v1/utxos` is instant. Reacts to block-connected notifications from the chain service in real time |
 | `AUTO_SYNC_INTERVAL_SEC` | `30` | Fallback poll interval (in seconds) used while waiting for initial header sync, and as a safety net if block-notification subscription is unavailable. Only used when `AUTO_SYNC_WATCHED=true` |
+| `MEMPOOL_ENABLED` | `true` | Enable the watched-only mempool tracker. The daemon subscribes to every connected peer's incoming `inv` messages, fetches each announced tx, and records the ones that pay or spend a watched address. Unconfirmed UTXOs are surfaced in `/v1/utxos` (with `height: 0`) and unconfirmed spends are overlaid on `/v1/utxo/{txid}/{vout}`. Disable with `MEMPOOL_ENABLED=false` to keep the chain-only behaviour |
 | `MAX_PEERS` | `8` | Maximum number of peers to connect to |
 | `NO_AUTH` | `false` | Disable TLS and token authentication (for development/regtest) |
 
@@ -128,6 +129,7 @@ Anyone can reproduce and verify a release locally with one command:
   --clearnet-initial-sync=true \
   --cfilter-cdn-auto=true \
   --maxpeers=8 \
+  --mempool=true \
   --no-auth        # Disable TLS + auth (dev/regtest only)
   # --reset-auth   # Regenerate TLS cert and auth token, then exit
 ```
@@ -238,9 +240,18 @@ Response:
   "synced": true,
   "block_height": 820000,
   "filter_height": 820000,
-  "peers": 8
+  "peers": 8,
+  "mempool_enabled": true,
+  "mempool": {
+    "entries": 4,
+    "utxos": 3,
+    "spends": 1,
+    "peers": 8
+  }
 }
 ```
+
+The `mempool` object is omitted when `MEMPOOL_ENABLED=false`. `entries` counts watched mempool txs, `utxos` counts unconfirmed outputs paying watched addresses, `spends` counts unconfirmed spends of watched outpoints, and `peers` reflects how many connected peers the tracker is subscribed to.
 
 ### Block Header
 
@@ -305,10 +316,15 @@ curl -X POST http://localhost:8334/v1/rescan \
     "addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"]
   }'
 
-# Then query UTXOs
+# Then query UTXOs (mempool entries are included by default)
 curl -X POST http://localhost:8334/v1/utxos \
   -H "Content-Type: application/json" \
   -d '{"addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"]}'
+
+# Suppress unconfirmed mempool entries
+curl -X POST http://localhost:8334/v1/utxos \
+  -H "Content-Type: application/json" \
+  -d '{"addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"], "include_mempool": false}'
 ```
 
 > **Note:** When `AUTO_SYNC_WATCHED=true` (the default), the daemon
@@ -317,6 +333,13 @@ curl -X POST http://localhost:8334/v1/utxos \
 > the initial rescan, subsequent `/v1/utxos` queries return immediately
 > without requiring another `/v1/rescan` — the daemon stays caught up
 > in real time and also re-syncs on every restart.
+
+> **Mempool:** When `MEMPOOL_ENABLED=true` (the default), unconfirmed
+> outputs paying a watched address are returned in the same `utxos`
+> array with `height: 0`. Set `include_mempool: false` in the request
+> body to opt out and receive only confirmed UTXOs. If the same outpoint
+> appears in both sets (e.g., the mempool tracker has not yet evicted a
+> just-confirmed tx), the confirmed entry wins.
 
 Response:
 ```json
@@ -329,6 +352,14 @@ Response:
       "address": "12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S",
       "scriptpubkey": "410411db93e1dcdb8a016b49840f8c53bc1eb68a382e97b1482ecad7b148a6909a5cb2e0eaddfb84ccf9744464f82e160bfa9b8b64f9d4c03f999b8643f656b412a3ac",
       "height": 9
+    },
+    {
+      "txid": "ea44e97271691990157559d0bdd9959e02790c34db6c006d779e82fa5aee708e",
+      "vout": 1,
+      "value": 12345,
+      "address": "12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S",
+      "scriptpubkey": "76a914...",
+      "height": 0
     }
   ]
 }
@@ -364,11 +395,49 @@ Response for spent UTXO:
 }
 ```
 
+Response for an on-chain unspent UTXO that has an unconfirmed spend in the
+mempool (when `MEMPOOL_ENABLED=true`, default):
+```json
+{
+  "unspent": true,
+  "value": 11516,
+  "scriptpubkey": "001481f291ca5498ec941b014fff4719201ba68939d5",
+  "mempool_spending_txid": "ccccdddd...",
+  "mempool_spending_input": 0,
+  "mempool_spend_first_seen": 1714501234
+}
+```
+
+Append `?include_mempool=false` to suppress the mempool overlay and receive
+only the on-chain status. A confirmed spend always takes precedence over
+any tracked mempool spend.
+
 **Important Notes**:
 - The `address` parameter is **required**. Compact block filters (BIP158) work by matching on scripts, not transaction IDs. Without the address, filter matching cannot work correctly.
 - Specifying a `start_height` parameter is **highly recommended** for performance. Set it to the block height where the UTXO was created (or slightly before). Without it, the scan could take a very long time as it scans from the provided height to the current chain tip.
 - The `start_height` means "start scanning FROM this height going FORWARD to the chain tip", not backwards.
 - Performance scales with the scan range: scanning 1 block takes ~0.01s, scanning 100 blocks takes ~0.5s, scanning 10,000+ blocks can take minutes.
+
+### Get Transaction (mempool only)
+
+Fetch a serialized transaction by txid. With `MEMPOOL_ENABLED=true` (default)
+the daemon returns the watched mempool tx if it has been observed; for any
+other txid it responds with `501 Not Implemented` because compact block
+filters do not allow looking up arbitrary historical transactions without a
+full block download.
+
+```bash
+curl http://localhost:8334/v1/tx/<txid>
+```
+
+Response when the tx is in the watched mempool:
+```json
+{
+  "txid": "ccccdddd...",
+  "hex": "0200000001...",
+  "mempool": true
+}
+```
 
 ### Rescan
 

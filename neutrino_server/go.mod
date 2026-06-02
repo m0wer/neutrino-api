@@ -14,7 +14,7 @@ require (
 	golang.org/x/net v0.48.0
 )
 
-replace github.com/lightninglabs/neutrino => github.com/m0wer/neutrino v0.0.0-20260409110914-c1b598b97446
+replace github.com/lightninglabs/neutrino => github.com/m0wer/neutrino v0.0.0-20260522161657-0d5f911e647c
 
 require (
 	github.com/aead/siphash v1.0.1 // indirect

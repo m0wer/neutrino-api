@@ -17,9 +17,20 @@ import (
 )
 
 // mockNode implements NodeInterface for testing
-type mockNode struct{}
+type mockNode struct {
+	getUTXOs     func(addresses []string) ([]neutrino.UTXO, error)
+	getUTXO      func(txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
+	mempoolUTXOs func(addresses []string) []neutrino.MempoolUTXO
+	mempoolSpend func(txid string, vout uint32) (neutrino.MempoolSpend, bool)
+	mempoolTx    func(txid string) (*wire.MsgTx, bool)
+	mempoolStats func() neutrino.MempoolStats
+	getStatus    func() neutrino.Status
+}
 
 func (m *mockNode) GetStatus() neutrino.Status {
+	if m.getStatus != nil {
+		return m.getStatus()
+	}
 	return neutrino.Status{
 		Synced:           true,
 		BlockHeight:      8543,
@@ -43,10 +54,16 @@ func (m *mockNode) BroadcastTransaction(tx *wire.MsgTx) error {
 }
 
 func (m *mockNode) GetUTXOs(addresses []string) ([]neutrino.UTXO, error) {
+	if m.getUTXOs != nil {
+		return m.getUTXOs(addresses)
+	}
 	return []neutrino.UTXO{}, nil
 }
 
 func (m *mockNode) GetUTXO(txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error) {
+	if m.getUTXO != nil {
+		return m.getUTXO(txid, vout, address, startHeight)
+	}
 	// Mock response for a spent UTXO
 	if txid == "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16" && vout == 0 {
 		return &neutrino.UTXOSpendReport{
@@ -78,6 +95,34 @@ func (m *mockNode) IsRescanInProgress() bool {
 
 func (m *mockNode) RescanStatus() neutrino.RescanStatus {
 	return neutrino.RescanStatus{}
+}
+
+func (m *mockNode) GetMempoolUTXOs(addresses []string) []neutrino.MempoolUTXO {
+	if m.mempoolUTXOs != nil {
+		return m.mempoolUTXOs(addresses)
+	}
+	return nil
+}
+
+func (m *mockNode) GetMempoolSpend(txid string, vout uint32) (neutrino.MempoolSpend, bool) {
+	if m.mempoolSpend != nil {
+		return m.mempoolSpend(txid, vout)
+	}
+	return neutrino.MempoolSpend{}, false
+}
+
+func (m *mockNode) GetMempoolTx(txid string) (*wire.MsgTx, bool) {
+	if m.mempoolTx != nil {
+		return m.mempoolTx(txid)
+	}
+	return nil, false
+}
+
+func (m *mockNode) MempoolStats() neutrino.MempoolStats {
+	if m.mempoolStats != nil {
+		return m.mempoolStats()
+	}
+	return neutrino.MempoolStats{}
 }
 
 const testVersion = "v0.10.1-test"
@@ -691,5 +736,325 @@ func TestLoggingMiddleware_Error(t *testing.T) {
 
 	if status := rr.Code; status != http.StatusBadRequest {
 		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusBadRequest)
+	}
+}
+
+// --- Mempool integration tests ---
+
+func newTestLogger() btclog.Logger {
+	return btclog.NewBackend(os.Stdout).Logger("TEST")
+}
+
+func postUTXOs(t *testing.T, h *Handler, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxos", h.handleGetUTXOs).Methods("POST")
+	jsonBody, _ := json.Marshal(body)
+	req, err := http.NewRequest("POST", "/v1/utxos", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestHandleGetUTXOs_IncludeMempoolDefaultOn verifies that mempool UTXOs are
+// merged into the response when the client omits include_mempool.
+func TestHandleGetUTXOs_IncludeMempoolDefaultOn(t *testing.T) {
+	addr := "bc1qtestaddr"
+	confirmed := neutrino.UTXO{
+		TxID:    "aaaa",
+		Vout:    0,
+		Value:   1000,
+		Address: addr,
+		Height:  800000,
+	}
+	mempool := neutrino.MempoolUTXO{
+		TxID:      "bbbb",
+		Vout:      1,
+		Value:     2000,
+		Address:   addr,
+		FirstSeen: 12345,
+	}
+
+	mock := &mockNode{
+		getUTXOs: func([]string) ([]neutrino.UTXO, error) {
+			return []neutrino.UTXO{confirmed}, nil
+		},
+		mempoolUTXOs: func([]string) []neutrino.MempoolUTXO {
+			return []neutrino.MempoolUTXO{mempool}
+		},
+	}
+	rr := postUTXOs(t, NewHandler(mock, newTestLogger()), map[string]any{
+		"addresses": []string{addr},
+	})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		UTXOs []neutrino.UTXO `json:"utxos"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.UTXOs) != 2 {
+		t.Fatalf("expected 2 utxos (confirmed + mempool), got %d", len(resp.UTXOs))
+	}
+	// The mempool entry must be the one with Height==0.
+	var got neutrino.UTXO
+	for _, u := range resp.UTXOs {
+		if u.Height == 0 {
+			got = u
+			break
+		}
+	}
+	if got.TxID != "bbbb" || got.Vout != 1 || got.Value != 2000 {
+		t.Errorf("unexpected mempool entry: %+v", got)
+	}
+}
+
+// TestHandleGetUTXOs_IncludeMempoolOptOut verifies that include_mempool=false
+// suppresses the mempool merge.
+func TestHandleGetUTXOs_IncludeMempoolOptOut(t *testing.T) {
+	addr := "bc1qtestaddr"
+	called := false
+	mock := &mockNode{
+		getUTXOs: func([]string) ([]neutrino.UTXO, error) {
+			return []neutrino.UTXO{}, nil
+		},
+		mempoolUTXOs: func([]string) []neutrino.MempoolUTXO {
+			called = true
+			return []neutrino.MempoolUTXO{{TxID: "bbbb"}}
+		},
+	}
+	includeMempool := false
+	rr := postUTXOs(t, NewHandler(mock, newTestLogger()), map[string]any{
+		"addresses":       []string{addr},
+		"include_mempool": &includeMempool,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	if called {
+		t.Error("GetMempoolUTXOs must not be invoked when include_mempool=false")
+	}
+	var resp struct {
+		UTXOs []neutrino.UTXO `json:"utxos"`
+	}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if len(resp.UTXOs) != 0 {
+		t.Errorf("expected 0 utxos, got %d", len(resp.UTXOs))
+	}
+}
+
+// TestHandleGetUTXOs_DedupConfirmedWinsOverMempool verifies that an outpoint
+// present in both confirmed and mempool sets is reported once with the
+// confirmed Height (mempool-tracker eviction lag should not double-count).
+func TestHandleGetUTXOs_DedupConfirmedWinsOverMempool(t *testing.T) {
+	addr := "bc1qtestaddr"
+	mock := &mockNode{
+		getUTXOs: func([]string) ([]neutrino.UTXO, error) {
+			return []neutrino.UTXO{{TxID: "aaaa", Vout: 0, Value: 1000, Address: addr, Height: 800000}}, nil
+		},
+		mempoolUTXOs: func([]string) []neutrino.MempoolUTXO {
+			return []neutrino.MempoolUTXO{{TxID: "aaaa", Vout: 0, Value: 1000, Address: addr}}
+		},
+	}
+	rr := postUTXOs(t, NewHandler(mock, newTestLogger()), map[string]any{
+		"addresses": []string{addr},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	var resp struct {
+		UTXOs []neutrino.UTXO `json:"utxos"`
+	}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if len(resp.UTXOs) != 1 {
+		t.Fatalf("expected dedup to 1 entry, got %d", len(resp.UTXOs))
+	}
+	if resp.UTXOs[0].Height != 800000 {
+		t.Errorf("expected confirmed Height to win, got %d", resp.UTXOs[0].Height)
+	}
+}
+
+// TestHandleGetUTXO_MempoolSpendOverlay verifies that an unconfirmed spend is
+// surfaced via mempool_* fields when the on-chain UTXO is still unspent.
+func TestHandleGetUTXO_MempoolSpendOverlay(t *testing.T) {
+	mock := &mockNode{
+		getUTXO: func(string, uint32, string, int32) (*neutrino.UTXOSpendReport, error) {
+			return &neutrino.UTXOSpendReport{Unspent: true, Value: 5000, ScriptPubKey: "00"}, nil
+		},
+		mempoolSpend: func(txid string, vout uint32) (neutrino.MempoolSpend, bool) {
+			return neutrino.MempoolSpend{
+				SpendingTxID: "cccc",
+				InputIndex:   2,
+				FirstSeen:    99,
+			}, true
+		},
+	}
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxo/{txid}/{vout}", NewHandler(mock, newTestLogger()).handleGetUTXO).Methods("GET")
+	req, _ := http.NewRequest("GET", "/v1/utxo/aaaa/0?address=bc1q&start_height=1", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	var resp map[string]any
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if got := resp["mempool_spending_txid"]; got != "cccc" {
+		t.Errorf("expected mempool_spending_txid=cccc, got %v", got)
+	}
+	if got := resp["unspent"].(bool); !got {
+		t.Error("expected unspent=true (mempool overlay only)")
+	}
+}
+
+// TestHandleGetUTXO_MempoolOptOut verifies that include_mempool=false skips
+// the mempool overlay even when a tracker spend exists.
+func TestHandleGetUTXO_MempoolOptOut(t *testing.T) {
+	called := false
+	mock := &mockNode{
+		getUTXO: func(string, uint32, string, int32) (*neutrino.UTXOSpendReport, error) {
+			return &neutrino.UTXOSpendReport{Unspent: true, Value: 5000}, nil
+		},
+		mempoolSpend: func(string, uint32) (neutrino.MempoolSpend, bool) {
+			called = true
+			return neutrino.MempoolSpend{SpendingTxID: "cccc"}, true
+		},
+	}
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxo/{txid}/{vout}", NewHandler(mock, newTestLogger()).handleGetUTXO).Methods("GET")
+	req, _ := http.NewRequest("GET", "/v1/utxo/aaaa/0?address=bc1q&include_mempool=false", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	if called {
+		t.Error("GetMempoolSpend must not be called when include_mempool=false")
+	}
+	var resp map[string]any
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if _, ok := resp["mempool_spending_txid"]; ok {
+		t.Error("mempool_spending_txid must not be present when opted out")
+	}
+}
+
+// TestHandleGetTransaction_MempoolHit verifies that the tx endpoint returns
+// the serialized tx hex when the mempool tracker holds a watched entry.
+func TestHandleGetTransaction_MempoolHit(t *testing.T) {
+	tx := wire.NewMsgTx(2)
+	mock := &mockNode{
+		mempoolTx: func(txid string) (*wire.MsgTx, bool) {
+			return tx, true
+		},
+	}
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/tx/{txid}", NewHandler(mock, newTestLogger()).handleGetTransaction).Methods("GET")
+	req, _ := http.NewRequest("GET", "/v1/tx/abcd", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp["mempool"] != true {
+		t.Errorf("expected mempool=true, got %v", resp["mempool"])
+	}
+	if _, ok := resp["hex"].(string); !ok {
+		t.Error("expected hex string in response")
+	}
+}
+
+// TestHandleGetTransaction_MempoolMissFallsThrough verifies the existing
+// not-implemented response when the tracker has no entry.
+func TestHandleGetTransaction_MempoolMissFallsThrough(t *testing.T) {
+	mock := &mockNode{}
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/tx/{txid}", NewHandler(mock, newTestLogger()).handleGetTransaction).Methods("GET")
+	req, _ := http.NewRequest("GET", "/v1/tx/abcd", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", rr.Code)
+	}
+}
+
+// TestHandleGetStatus_IncludesMempoolFields verifies that /v1/status surfaces
+// MempoolEnabled and the embedded MempoolStats when the tracker is active.
+func TestHandleGetStatus_IncludesMempoolFields(t *testing.T) {
+	mempool := neutrino.MempoolStats{Entries: 7, UTXOs: 5, Spends: 2, Peers: 4}
+	mock := &mockNode{
+		getStatus: func() neutrino.Status {
+			return neutrino.Status{
+				Synced:           true,
+				BlockHeight:      900000,
+				FilterHeight:     900000,
+				Peers:            4,
+				Version:          testVersion,
+				WatchedAddresses: 1,
+				MempoolEnabled:   true,
+				Mempool:          &mempool,
+			}
+		},
+	}
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/status", NewHandler(mock, newTestLogger(), testVersion).handleGetStatus).Methods("GET")
+	req, _ := http.NewRequest("GET", "/v1/status", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp neutrino.Status
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.MempoolEnabled {
+		t.Error("expected mempool_enabled=true")
+	}
+	if resp.Mempool == nil {
+		t.Fatal("expected non-nil mempool stats")
+	}
+	if *resp.Mempool != mempool {
+		t.Errorf("mempool stats mismatch: got %+v want %+v", *resp.Mempool, mempool)
+	}
+}
+
+// TestHandleGetStatus_OmitsMempoolWhenDisabled verifies that the mempool
+// field is omitted from the JSON response when the tracker is disabled.
+func TestHandleGetStatus_OmitsMempoolWhenDisabled(t *testing.T) {
+	mock := &mockNode{
+		getStatus: func() neutrino.Status {
+			return neutrino.Status{
+				Synced:         true,
+				Version:        testVersion,
+				MempoolEnabled: false,
+				Mempool:        nil,
+			}
+		},
+	}
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/status", NewHandler(mock, newTestLogger(), testVersion).handleGetStatus).Methods("GET")
+	req, _ := http.NewRequest("GET", "/v1/status", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := raw["mempool"]; present {
+		t.Error("mempool field must be omitted when nil")
+	}
+	if got, _ := raw["mempool_enabled"].(bool); got {
+		t.Error("expected mempool_enabled=false")
 	}
 }

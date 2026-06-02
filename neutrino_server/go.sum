@@ -91,8 +91,8 @@ github.com/lightningnetwork/lnd/queue v1.0.1 h1:jzJKcTy3Nj5lQrooJ3aaw9Lau3I0IwvQ
 github.com/lightningnetwork/lnd/queue v1.0.1/go.mod h1:vaQwexir73flPW43Mrm7JOgJHmcEFBWWSl9HlyASoms=
 github.com/lightningnetwork/lnd/ticker v1.0.0 h1:S1b60TEGoTtCe2A0yeB+ecoj/kkS4qpwh6l+AkQEZwU=
 github.com/lightningnetwork/lnd/ticker v1.0.0/go.mod h1:iaLXJiVgI1sPANIF2qYYUJXjoksPNvGNYowB8aRbpX0=
-github.com/m0wer/neutrino v0.0.0-20260409110914-c1b598b97446 h1:c6MpEEzMXuQaIZw+GkvrqcyQG5QceDEUEKBBkA9xU5A=
-github.com/m0wer/neutrino v0.0.0-20260409110914-c1b598b97446/go.mod h1:fNjnbuSPw4lRsVAzvjC1JG7IE7rqae/mbek2tNkN/Dw=
+github.com/m0wer/neutrino v0.0.0-20260522161657-0d5f911e647c h1:DEv0lannTrzm70LLj/svu0EgBlb2JN359QB9wMs/ayI=
+github.com/m0wer/neutrino v0.0.0-20260522161657-0d5f911e647c/go.mod h1:tcwCgRTGWcaua0L/xzdwllW8eslHDbux4XkiYsivvHE=
 github.com/nxadm/tail v1.4.4/go.mod h1:kenIhsEOeOJmVchQTgglprH7qJGnHDVpk1VPCcaMI8A=
 github.com/onsi/ginkgo v1.6.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+WWjE=
 github.com/onsi/ginkgo v1.7.0/go.mod h1:lLunBs/Ym6LB5Z9jYTR76FiuTmxDTDusOGeTQH+WWjE=
