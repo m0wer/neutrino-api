@@ -75,16 +75,25 @@ BUILD_DIR="$(mktemp -d "$REPO_ROOT/tmp/repro-build.${VERSION}.XXXXXX")"
 chmod 0777 "$BUILD_DIR"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
+# Must stay in sync with the build matrix in .github/workflows/release.yaml.
+# Fields: GOOS GOARCH GOARM OUTPUT ("-" for GOARM when not applicable).
 declare -a TARGETS=(
-    "linux amd64 neutrinod-linux-amd64"
-    "linux arm64 neutrinod-linux-arm64"
-    "darwin amd64 neutrinod-darwin-amd64"
-    "darwin arm64 neutrinod-darwin-arm64"
-    "windows amd64 neutrinod-windows-amd64.exe"
+    "linux amd64 - neutrinod-linux-amd64"
+    "linux 386 - neutrinod-linux-386"
+    "linux arm64 - neutrinod-linux-arm64"
+    "linux arm 7 neutrinod-linux-armv7"
+    "linux arm 6 neutrinod-linux-armv6"
+    "darwin amd64 - neutrinod-darwin-amd64"
+    "darwin arm64 - neutrinod-darwin-arm64"
+    "windows amd64 - neutrinod-windows-amd64.exe"
+    "windows arm64 - neutrinod-windows-arm64.exe"
 )
 
 for target in "${TARGETS[@]}"; do
-    read -r GOOS GOARCH OUTPUT <<<"$target"
+    read -r GOOS GOARCH GOARM OUTPUT <<<"$target"
+    if [[ "$GOARM" == "-" ]]; then
+        GOARM=""
+    fi
     echo "Building $OUTPUT"
 
     if [[ "$USE_DOCKER" == true ]]; then
@@ -92,6 +101,7 @@ for target in "${TARGETS[@]}"; do
             --user "$(id -u):$(id -g)" \
             -e GOOS="$GOOS" \
             -e GOARCH="$GOARCH" \
+            -e GOARM="$GOARM" \
             -e CGO_ENABLED=0 \
             -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
             -e GOCACHE=/tmp/go-build-cache \
@@ -111,6 +121,7 @@ for target in "${TARGETS[@]}"; do
             cd "$REPO_ROOT/neutrino_server"
             GOOS="$GOOS" \
             GOARCH="$GOARCH" \
+            GOARM="$GOARM" \
             CGO_ENABLED=0 \
             SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
             go build \

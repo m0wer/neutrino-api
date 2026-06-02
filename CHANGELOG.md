@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release signing scripts now build the full platform matrix.** The CI
+  release workflow was expanded to nine targets (adding `linux/386`,
+  `linux/armv7`, `linux/armv6`, and `windows/arm64`), but
+  `scripts/release-build-sign.sh` and `scripts/verify-release-build.sh`
+  still produced only five. This made the committed `SHA256SUMS` shorter
+  than the CI-generated one, so the release checksum verification step
+  failed even though the builds were fully reproducible. Both scripts now
+  cover all nine platforms (including `GOARM` handling) and the v1.3.0
+  digest has been regenerated and re-signed.
+
 ## [1.3.0] - 2026-06-02
 
 ### Added
