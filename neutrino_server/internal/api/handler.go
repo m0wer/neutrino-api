@@ -38,6 +38,10 @@ type NodeInterface interface {
 	GetMempoolSpend(txid string, vout uint32) (neutrino.MempoolSpend, bool)
 	GetMempoolTx(txid string) (*wire.MsgTx, bool)
 	MempoolStats() neutrino.MempoolStats
+
+	// GetTxHistory returns confirmed watched-tx records above sinceHeight plus
+	// current mempool entries. Empty when tx-history tracking is disabled.
+	GetTxHistory(sinceHeight int32) (neutrino.TxHistoryResponse, error)
 }
 
 // Handler provides REST API endpoints for the neutrino node.
@@ -75,6 +79,7 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/v1/block/{height}/filter_header", h.handleGetFilterHeader).Methods("GET")
 
 	// Transaction operations
+	r.HandleFunc("/v1/transactions", h.handleGetTransactions).Methods("GET")
 	r.HandleFunc("/v1/tx/{txid}", h.handleGetTransaction).Methods("GET")
 	r.HandleFunc("/v1/tx/broadcast", h.handleBroadcastTransaction).Methods("POST")
 
@@ -235,6 +240,32 @@ func (h *Handler) handleGetTransaction(w http.ResponseWriter, r *http.Request) {
 	// Confirmed-tx lookup is unimplemented — neutrino doesn't store full
 	// blocks/txs by default.
 	h.errorResponse(w, http.StatusNotImplemented, "transaction lookup requires full block download")
+}
+
+// handleGetTransactions serves GET /v1/transactions?since_height=N.
+//
+// Returns confirmed watched-transaction records with height strictly above N
+// (0 by default), plus every current mempool entry, each with raw hex. The
+// response cursor is the highest confirmed height included (or the requested
+// height when there were none), which the client passes back as since_height on
+// the next poll for incremental enumeration.
+func (h *Handler) handleGetTransactions(w http.ResponseWriter, r *http.Request) {
+	sinceHeight := int32(0)
+	if sh := r.URL.Query().Get("since_height"); sh != "" {
+		parsed, err := strconv.ParseInt(sh, 10, 32)
+		if err != nil || parsed < 0 {
+			h.errorResponse(w, http.StatusBadRequest, "invalid since_height")
+			return
+		}
+		sinceHeight = int32(parsed)
+	}
+
+	resp, err := h.node.GetTxHistory(sinceHeight)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to load transaction history")
+		return
+	}
+	h.jsonResponse(w, resp)
 }
 
 // Broadcast transaction endpoint

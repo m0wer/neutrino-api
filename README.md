@@ -113,6 +113,7 @@ Anyone can reproduce and verify a release locally with one command:
 | `AUTO_SYNC_WATCHED` | `true` | Continuously scan new blocks for watched addresses in the background, keeping the UTXO set up-to-date so `/v1/utxos` is instant. Reacts to block-connected notifications from the chain service in real time |
 | `AUTO_SYNC_INTERVAL_SEC` | `30` | Fallback poll interval (in seconds) used while waiting for initial header sync, and as a safety net if block-notification subscription is unavailable. Only used when `AUTO_SYNC_WATCHED=true` |
 | `MEMPOOL_ENABLED` | `true` | Enable the watched-only mempool tracker. The daemon subscribes to every connected peer's incoming `inv` messages, fetches each announced tx, and records the ones that pay or spend a watched address. Unconfirmed UTXOs are surfaced in `/v1/utxos` (with `height: 0`) and unconfirmed spends are overlaid on `/v1/utxo/{txid}/{vout}`. Disable with `MEMPOOL_ENABLED=false` to keep the chain-only behaviour |
+| `TX_HISTORY_ENABLED` | `true` | Persist confirmed watched-transaction records during scanning so clients can reconstruct wallet history via `GET /v1/transactions`. Advertised as `tx_history_enabled` in `/v1/status`. Disable with `TX_HISTORY_ENABLED=false` |
 | `MAX_PEERS` | `8` | Maximum number of peers to connect to |
 | `NO_AUTH` | `false` | Disable TLS and token authentication (for development/regtest) |
 
@@ -242,6 +243,7 @@ Response:
   "filter_height": 820000,
   "peers": 8,
   "mempool_enabled": true,
+  "tx_history_enabled": true,
   "mempool": {
     "entries": 4,
     "utxos": 3,
@@ -251,7 +253,7 @@ Response:
 }
 ```
 
-The `mempool` object is omitted when `MEMPOOL_ENABLED=false`. `entries` counts watched mempool txs, `utxos` counts unconfirmed outputs paying watched addresses, `spends` counts unconfirmed spends of watched outpoints, and `peers` reflects how many connected peers the tracker is subscribed to.
+The `mempool` object is omitted when `MEMPOOL_ENABLED=false`. `entries` counts watched mempool txs, `utxos` counts unconfirmed outputs paying watched addresses, `spends` counts unconfirmed spends of watched outpoints, and `peers` reflects how many connected peers the tracker is subscribed to. `tx_history_enabled` reflects whether confirmed transaction history is being persisted for `GET /v1/transactions`.
 
 ### Block Header
 
@@ -438,6 +440,54 @@ Response when the tx is in the watched mempool:
   "mempool": true
 }
 ```
+
+### Get Transaction History
+
+Enumerate transactions that touched a watched address. Returns confirmed
+records with block height strictly greater than `since_height` (default `0`),
+plus every current mempool entry, each with raw hex. Poll incrementally by
+passing back the returned `cursor` as the next `since_height`.
+
+Requires `TX_HISTORY_ENABLED=true` (default); check `tx_history_enabled` in
+`/v1/status`.
+
+```bash
+curl "http://localhost:8334/v1/transactions?since_height=820000"
+```
+
+Response:
+```json
+{
+  "transactions": [
+    {
+      "txid": "aaaa1111...",
+      "hex": "0200000001...",
+      "height": 820005,
+      "confirmed": true,
+      "addresses": ["bc1q..."],
+      "direction": "receive"
+    },
+    {
+      "txid": "bbbb2222...",
+      "hex": "0200000002...",
+      "height": 0,
+      "confirmed": false,
+      "addresses": ["bc1q..."],
+      "direction": "spend",
+      "first_seen": 1720000000
+    }
+  ],
+  "cursor": 820005
+}
+```
+
+`direction` is `receive` (the tx created a watched output), `spend` (it spent a
+watched outpoint), or `receive,spend`. `confirmed: false` entries come from the
+mempool (`height: 0`, with a `first_seen` Unix timestamp). `cursor` is the
+highest confirmed height returned (or the requested `since_height` when there
+were none). History is best-effort: only transactions in blocks that matched
+the compact filter for a watched script are recorded, and on a reorg re-scan
+records at or above the re-scan height are pruned (clients dedupe by txid).
 
 ### Rescan
 

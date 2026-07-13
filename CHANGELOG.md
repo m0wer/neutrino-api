@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-13
+
+### Added
+
+- **Confirmed transaction history and `GET /v1/transactions` endpoint.** The
+  server now persists a record of every confirmed transaction that touches a
+  watched address (txid, height, raw hex, matched addresses, and
+  receive/spend direction) into a new `tx_history` bucket in
+  `rescan_state.db`, populated during scanning. A new
+  `GET /v1/transactions?since_height=N` endpoint returns those confirmed
+  records with height above `N`, plus every current mempool entry, each with
+  raw hex, and a `cursor` for incremental polling. This lets light-client
+  wallets reconstruct and live-update their transaction history without full
+  block downloads. Enabled by default; controlled by the `--tx-history` flag
+  (`TX_HISTORY_ENABLED`) and advertised as `tx_history_enabled` in
+  `/v1/status`. On a reorg re-scan, history records at or above the re-scan
+  start height are pruned. `--reset-auth` clears the history bucket along with
+  the other privacy data.
+
 ### Fixed
 
 - **Release signing scripts now build the full platform matrix.** The CI

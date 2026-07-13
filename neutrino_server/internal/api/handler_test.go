@@ -25,6 +25,7 @@ type mockNode struct {
 	mempoolTx    func(txid string) (*wire.MsgTx, bool)
 	mempoolStats func() neutrino.MempoolStats
 	getStatus    func() neutrino.Status
+	txHistory    func(sinceHeight int32) (neutrino.TxHistoryResponse, error)
 }
 
 func (m *mockNode) GetStatus() neutrino.Status {
@@ -123,6 +124,13 @@ func (m *mockNode) MempoolStats() neutrino.MempoolStats {
 		return m.mempoolStats()
 	}
 	return neutrino.MempoolStats{}
+}
+
+func (m *mockNode) GetTxHistory(sinceHeight int32) (neutrino.TxHistoryResponse, error) {
+	if m.txHistory != nil {
+		return m.txHistory(sinceHeight)
+	}
+	return neutrino.TxHistoryResponse{Transactions: []neutrino.TxHistoryRecord{}, Cursor: sinceHeight}, nil
 }
 
 const testVersion = "v0.10.1-test"
@@ -1056,5 +1064,78 @@ func TestHandleGetStatus_OmitsMempoolWhenDisabled(t *testing.T) {
 	}
 	if got, _ := raw["mempool_enabled"].(bool); got {
 		t.Error("expected mempool_enabled=false")
+	}
+}
+
+// TestHandleGetStatus_IncludesTxHistoryFlag verifies /v1/status surfaces the
+// tx_history_enabled capability flag.
+func TestHandleGetStatus_IncludesTxHistoryFlag(t *testing.T) {
+	mock := &mockNode{
+		getStatus: func() neutrino.Status {
+			return neutrino.Status{Synced: true, Version: testVersion, TxHistoryEnabled: true}
+		},
+	}
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/status", NewHandler(mock, newTestLogger(), testVersion).handleGetStatus).Methods("GET")
+	req, _ := http.NewRequest("GET", "/v1/status", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	var resp neutrino.Status
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.TxHistoryEnabled {
+		t.Error("expected tx_history_enabled=true")
+	}
+}
+
+// TestHandleGetTransactions verifies the /v1/transactions endpoint returns the
+// node's history response and parses since_height.
+func TestHandleGetTransactions(t *testing.T) {
+	var gotSince int32
+	mock := &mockNode{
+		txHistory: func(sinceHeight int32) (neutrino.TxHistoryResponse, error) {
+			gotSince = sinceHeight
+			return neutrino.TxHistoryResponse{
+				Transactions: []neutrino.TxHistoryRecord{
+					{TxID: "aa", Hex: "00", Height: 205, Confirmed: true, Direction: "receive"},
+					{TxID: "bb", Hex: "01", Height: 0, Confirmed: false, Direction: "spend"},
+				},
+				Cursor: 205,
+			}, nil
+		},
+	}
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/transactions", NewHandler(mock, newTestLogger(), testVersion).handleGetTransactions).Methods("GET")
+	req, _ := http.NewRequest("GET", "/v1/transactions?since_height=200", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if gotSince != 200 {
+		t.Errorf("expected since_height=200 forwarded, got %d", gotSince)
+	}
+	var resp neutrino.TxHistoryResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Transactions) != 2 || resp.Cursor != 205 {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+}
+
+// TestHandleGetTransactions_InvalidSince rejects a malformed since_height.
+func TestHandleGetTransactions_InvalidSince(t *testing.T) {
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/transactions", NewHandler(&mockNode{}, newTestLogger(), testVersion).handleGetTransactions).Methods("GET")
+	req, _ := http.NewRequest("GET", "/v1/transactions?since_height=abc", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
 	}
 }

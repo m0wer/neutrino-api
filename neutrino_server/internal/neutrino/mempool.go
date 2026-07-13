@@ -22,6 +22,7 @@ Eviction:
 package neutrino
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -577,4 +578,54 @@ func (m *MempoolTracker) Stats() MempoolStats {
 		Spends:  len(m.spends),
 		Peers:   len(m.peers),
 	}
+}
+
+// ListTxHistory returns a TxHistoryRecord for every current mempool entry,
+// with the raw hex, first-seen timestamp, receive addresses, and direction.
+// Used by GET /v1/transactions to include unconfirmed activity.
+func (m *MempoolTracker) ListTxHistory() []TxHistoryRecord {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make([]TxHistoryRecord, 0, len(m.entries))
+	for txid, entry := range m.entries {
+		var buf bytes.Buffer
+		if err := entry.tx.Serialize(&buf); err != nil {
+			m.logger.Warnf("Failed to serialize mempool tx %s: %v", txid, err)
+			continue
+		}
+
+		// Resolve receive addresses from the tracked created UTXOs.
+		addrSeen := make(map[string]struct{})
+		addrs := make([]string, 0, len(entry.createdUTXOs))
+		for _, utxoKey := range entry.createdUTXOs {
+			if u, ok := m.utxos[utxoKey]; ok && u.Address != "" {
+				if _, dup := addrSeen[u.Address]; !dup {
+					addrs = append(addrs, u.Address)
+					addrSeen[u.Address] = struct{}{}
+				}
+			}
+		}
+
+		recv := len(entry.createdUTXOs) > 0
+		spend := len(entry.spentOutpoints) > 0
+		direction := "receive"
+		switch {
+		case recv && spend:
+			direction = "receive,spend"
+		case spend:
+			direction = "spend"
+		}
+
+		out = append(out, TxHistoryRecord{
+			TxID:      txid,
+			Hex:       hex.EncodeToString(buf.Bytes()),
+			Height:    0,
+			Confirmed: false,
+			Addresses: addrs,
+			Direction: direction,
+			FirstSeen: entry.firstSeen.Unix(),
+		})
+	}
+	return out
 }

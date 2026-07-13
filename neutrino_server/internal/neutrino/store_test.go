@@ -375,3 +375,121 @@ func TestStateStoreCloseNil(t *testing.T) {
 		t.Errorf("Close() on nil db should not error, got: %v", err)
 	}
 }
+
+func TestTxHistorySaveAndLoadSince(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+
+	recs := []TxHistoryRecord{
+		{TxID: "aa", Hex: "00", Height: 100, Confirmed: true, Direction: "receive"},
+		{TxID: "bb", Hex: "01", Height: 200, Confirmed: true, Direction: "spend"},
+		{TxID: "cc", Hex: "02", Height: 200, Confirmed: true, Direction: "receive,spend"},
+	}
+	if err := store.SaveTxHistoryBatch(recs); err != nil {
+		t.Fatalf("SaveTxHistoryBatch() error: %v", err)
+	}
+
+	// since=150 must return only the two height-200 records, ascending.
+	got, err := store.LoadTxHistorySince(150)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince() error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 records above 150, got %d", len(got))
+	}
+	for _, r := range got {
+		if r.Height != 200 {
+			t.Errorf("expected height 200, got %d", r.Height)
+		}
+	}
+
+	// since=0 returns all three.
+	all, err := store.LoadTxHistorySince(0)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince(0) error: %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("expected 3 records, got %d", len(all))
+	}
+	// Ascending by height: first record is the height-100 one.
+	if all[0].Height != 100 {
+		t.Errorf("expected ascending order, first height=%d", all[0].Height)
+	}
+}
+
+func TestTxHistoryIdempotentAndPersistsAcrossReopen(t *testing.T) {
+	store, dir := newTestStore(t)
+
+	rec := TxHistoryRecord{TxID: "aa", Hex: "00", Height: 100, Confirmed: true}
+	if err := store.SaveTxHistory(rec); err != nil {
+		t.Fatalf("SaveTxHistory() error: %v", err)
+	}
+	// Re-saving the same (height, txid) overwrites, not duplicates.
+	rec.Direction = "spend"
+	if err := store.SaveTxHistory(rec); err != nil {
+		t.Fatalf("SaveTxHistory() re-save error: %v", err)
+	}
+	store.Close()
+
+	store2, err := OpenStateStore(dir, btclog.NewBackend(os.Stdout).Logger("TEST"))
+	if err != nil {
+		t.Fatalf("reopen error: %v", err)
+	}
+	defer store2.Close()
+
+	got, err := store2.LoadTxHistorySince(0)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince() error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 record after reopen, got %d", len(got))
+	}
+	if got[0].Direction != "spend" {
+		t.Errorf("expected overwritten record, got direction %q", got[0].Direction)
+	}
+}
+
+func TestTxHistoryDeleteFrom(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+
+	recs := []TxHistoryRecord{
+		{TxID: "aa", Height: 100, Confirmed: true},
+		{TxID: "bb", Height: 200, Confirmed: true},
+		{TxID: "cc", Height: 300, Confirmed: true},
+	}
+	if err := store.SaveTxHistoryBatch(recs); err != nil {
+		t.Fatalf("SaveTxHistoryBatch() error: %v", err)
+	}
+
+	// Simulate a reorg re-scan from height 200: records at/above 200 drop.
+	if err := store.DeleteTxHistoryFrom(200); err != nil {
+		t.Fatalf("DeleteTxHistoryFrom() error: %v", err)
+	}
+	got, err := store.LoadTxHistorySince(0)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince() error: %v", err)
+	}
+	if len(got) != 1 || got[0].Height != 100 {
+		t.Errorf("expected only the height-100 record to remain, got %+v", got)
+	}
+}
+
+func TestTxHistoryClearedByClearPrivacyData(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+
+	if err := store.SaveTxHistory(TxHistoryRecord{TxID: "aa", Height: 100, Confirmed: true}); err != nil {
+		t.Fatalf("SaveTxHistory() error: %v", err)
+	}
+	if err := store.ClearPrivacyData(); err != nil {
+		t.Fatalf("ClearPrivacyData() error: %v", err)
+	}
+	got, err := store.LoadTxHistorySince(0)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince() error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected tx history cleared, got %d records", len(got))
+	}
+}

@@ -78,6 +78,11 @@ type Config struct {
 	// announced transaction, and matches it against watched scripts and
 	// outpoints from the RescanManager. Defaults to true.
 	MempoolEnabled bool
+
+	// TxHistoryEnabled enables persisting confirmed watched-transaction
+	// records during scanning so clients can reconstruct wallet history via
+	// GET /v1/transactions. Defaults to true.
+	TxHistoryEnabled bool
 }
 
 // Node wraps a neutrino ChainService with additional functionality.
@@ -123,6 +128,34 @@ type Transaction struct {
 	BlockTime   int64  `json:"block_time,omitempty"`
 }
 
+// TxHistoryRecord is a watched transaction observed by the server: either
+// confirmed (persisted in the tx-history store) or currently in the mempool.
+// Clients use it to reconstruct wallet history without full-block access.
+type TxHistoryRecord struct {
+	TxID string `json:"txid"`
+	Hex  string `json:"hex"`
+	// Height is the confirmation height (0 for mempool entries).
+	Height int32 `json:"height"`
+	// Confirmed is false for mempool entries, true for on-chain records.
+	Confirmed bool `json:"confirmed"`
+	// Addresses are the watched addresses this transaction touched.
+	Addresses []string `json:"addresses,omitempty"`
+	// Direction is "receive" (created a watched output), "spend" (spent a
+	// watched outpoint), or "receive,spend" when both apply.
+	Direction string `json:"direction,omitempty"`
+	// FirstSeen is the mempool first-seen Unix timestamp (0 for confirmed).
+	FirstSeen int64 `json:"first_seen,omitempty"`
+}
+
+// TxHistoryResponse is the payload of GET /v1/transactions: confirmed records
+// above the requested height plus current mempool entries, and a cursor
+// (the highest confirmed height included, or the requested height when none)
+// for the next incremental poll.
+type TxHistoryResponse struct {
+	Transactions []TxHistoryRecord `json:"transactions"`
+	Cursor       int32             `json:"cursor"`
+}
+
 // Status represents the current node status.
 type Status struct {
 	Synced           bool          `json:"synced"`
@@ -132,6 +165,7 @@ type Status struct {
 	Version          string        `json:"version"`
 	WatchedAddresses int           `json:"watched_addresses"`
 	MempoolEnabled   bool          `json:"mempool_enabled"`
+	TxHistoryEnabled bool          `json:"tx_history_enabled"`
 	Mempool          *MempoolStats `json:"mempool,omitempty"`
 }
 
@@ -263,6 +297,7 @@ func (n *Node) Start() error {
 
 	// Create rescan manager with persistence
 	n.rescanMgr = NewRescanManager(n.chainService, n.logger, stateStore)
+	n.rescanMgr.SetTxHistoryEnabled(n.config.TxHistoryEnabled)
 
 	// Start sync monitoring goroutine
 	go n.monitorSync()
@@ -545,6 +580,7 @@ func (n *Node) GetStatus() Status {
 		Version:          n.version,
 		WatchedAddresses: watchedAddresses,
 		MempoolEnabled:   n.config != nil && n.config.MempoolEnabled,
+		TxHistoryEnabled: n.config != nil && n.config.TxHistoryEnabled,
 		Mempool:          mempoolStats,
 	}
 }
@@ -639,6 +675,30 @@ func (n *Node) MempoolStats() MempoolStats {
 		return MempoolStats{}
 	}
 	return n.mempool.Stats()
+}
+
+// GetTxHistory returns confirmed watched-transaction records with height above
+// sinceHeight, plus current mempool entries, and a cursor (the highest
+// confirmed height included, or sinceHeight when none) for the next poll.
+// Returns an empty result when history tracking is disabled.
+func (n *Node) GetTxHistory(sinceHeight int32) (TxHistoryResponse, error) {
+	resp := TxHistoryResponse{Transactions: []TxHistoryRecord{}, Cursor: sinceHeight}
+	if n.rescanMgr != nil {
+		confirmed, err := n.rescanMgr.TxHistorySince(sinceHeight)
+		if err != nil {
+			return resp, err
+		}
+		for _, rec := range confirmed {
+			resp.Transactions = append(resp.Transactions, rec)
+			if rec.Height > resp.Cursor {
+				resp.Cursor = rec.Height
+			}
+		}
+	}
+	if n.mempool != nil {
+		resp.Transactions = append(resp.Transactions, n.mempool.ListTxHistory()...)
+	}
+	return resp, nil
 }
 
 // WatchAddress adds an address to the watch list.

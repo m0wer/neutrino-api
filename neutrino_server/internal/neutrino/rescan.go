@@ -4,6 +4,7 @@ Package neutrino provides UTXO scanning using compact block filters.
 package neutrino
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -51,6 +52,32 @@ type RescanManager struct {
 	// Set via SetMempoolTracker; nil when mempool tracking is disabled.
 	// Guarded by mu (write on Set, read in notifyMempoolPostScan).
 	mempool *MempoolTracker
+
+	// txHistoryEnabled persists confirmed watched-tx records during scanning
+	// (requires a non-nil store). Set via SetTxHistoryEnabled.
+	txHistoryEnabled bool
+}
+
+// SetTxHistoryEnabled toggles persistence of confirmed watched-transaction
+// history records during scanning.
+func (r *RescanManager) SetTxHistoryEnabled(enabled bool) {
+	r.mu.Lock()
+	r.txHistoryEnabled = enabled
+	r.mu.Unlock()
+}
+
+// TxHistorySince returns confirmed watched-transaction records with height
+// strictly greater than sinceHeight. Returns nil when history is disabled or
+// no store is configured.
+func (r *RescanManager) TxHistorySince(sinceHeight int32) ([]TxHistoryRecord, error) {
+	r.mu.RLock()
+	store := r.store
+	enabled := r.txHistoryEnabled
+	r.mu.RUnlock()
+	if store == nil || !enabled {
+		return nil, nil
+	}
+	return store.LoadTxHistorySince(sinceHeight)
 }
 
 // RescanStatus exposes rescan lifecycle details for API consumers.
@@ -714,6 +741,23 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 		}
 	}
 
+	// Snapshot the pre-scan watched outpoints and the tx-history toggle so
+	// the block loop can label a transaction as spending one of our coins
+	// without holding the lock during network I/O.
+	r.mu.RLock()
+	historyEnabled := r.txHistoryEnabled && r.store != nil
+	watchedOutpoints := make(map[string]struct{}, len(r.utxoSet))
+	if historyEnabled {
+		for key := range r.utxoSet {
+			watchedOutpoints[key] = struct{}{}
+		}
+	}
+	r.mu.RUnlock()
+
+	// txHistory accumulates confirmed watched-tx records for this scan; keyed
+	// by txid so receive+spend on the same tx merge into one record.
+	txHistory := make(map[string]*TxHistoryRecord)
+
 	// Phase 2: fetch full blocks only for matched heights.
 	slices.Sort(matchedHeights)
 	for _, height := range matchedHeights {
@@ -734,12 +778,19 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 			txHash := tx.Hash().String()
 			confirmedTxids = append(confirmedTxids, txHash)
 
+			spendsWatched := false
 			for _, txIn := range tx.MsgTx().TxIn {
 				prevOut := txIn.PreviousOutPoint
 				key := fmt.Sprintf("%s:%d", prevOut.Hash.String(), prevOut.Index)
 				spentOutputs[key] = true
+				if historyEnabled {
+					if _, ok := watchedOutpoints[key]; ok {
+						spendsWatched = true
+					}
+				}
 			}
 
+			receiveAddrs := make([]string, 0)
 			for vout, txOut := range tx.MsgTx().TxOut {
 				scriptHex := hex.EncodeToString(txOut.PkScript)
 				if addrStr, ok := addrToScript[scriptHex]; ok {
@@ -753,10 +804,26 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 						Height:       height,
 					}
 					foundUTXOs[utxoKey] = utxo
+					receiveAddrs = append(receiveAddrs, addrStr)
 					r.logger.Infof("Found UTXO: %s:%d value=%d address=%s height=%d",
 						txHash, vout, txOut.Value, addrStr, height)
 				}
 			}
+
+			if historyEnabled && (len(receiveAddrs) > 0 || spendsWatched) {
+				r.recordTxHistory(txHistory, tx, txHash, height, receiveAddrs, spendsWatched)
+			}
+		}
+	}
+
+	// Persist the confirmed watched-tx records for this scan.
+	if historyEnabled && len(txHistory) > 0 {
+		recs := make([]TxHistoryRecord, 0, len(txHistory))
+		for _, rec := range txHistory {
+			recs = append(recs, *rec)
+		}
+		if err := r.store.SaveTxHistoryBatch(recs); err != nil {
+			r.logger.Warnf("Failed to persist %d tx history record(s): %v", len(recs), err)
 		}
 	}
 
@@ -810,6 +877,56 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil
 	}
 
 	return confirmedTxids, nil
+}
+
+// recordTxHistory merges a confirmed watched transaction into the per-scan
+// history map, combining receive and spend involvement into one record.
+func (r *RescanManager) recordTxHistory(
+	txHistory map[string]*TxHistoryRecord,
+	tx *btcutil.Tx,
+	txHash string,
+	height int32,
+	receiveAddrs []string,
+	spendsWatched bool,
+) {
+	rec, ok := txHistory[txHash]
+	if !ok {
+		var buf bytes.Buffer
+		if err := tx.MsgTx().Serialize(&buf); err != nil {
+			r.logger.Warnf("Failed to serialize tx %s for history: %v", txHash, err)
+			return
+		}
+		rec = &TxHistoryRecord{
+			TxID:      txHash,
+			Hex:       hex.EncodeToString(buf.Bytes()),
+			Height:    height,
+			Confirmed: true,
+		}
+		txHistory[txHash] = rec
+	}
+
+	// Merge receive addresses (deduplicated) and the spend flag.
+	seen := make(map[string]struct{}, len(rec.Addresses))
+	for _, a := range rec.Addresses {
+		seen[a] = struct{}{}
+	}
+	for _, a := range receiveAddrs {
+		if _, dup := seen[a]; !dup {
+			rec.Addresses = append(rec.Addresses, a)
+			seen[a] = struct{}{}
+		}
+	}
+
+	recv := len(rec.Addresses) > 0
+	spend := spendsWatched || rec.Direction == "spend" || rec.Direction == "receive,spend"
+	switch {
+	case recv && spend:
+		rec.Direction = "receive,spend"
+	case spend:
+		rec.Direction = "spend"
+	default:
+		rec.Direction = "receive"
+	}
 }
 
 // verifyUTXOsUnspent performs a per-UTXO spend check for all UTXOs in the

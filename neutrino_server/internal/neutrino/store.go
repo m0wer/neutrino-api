@@ -26,6 +26,10 @@ var (
 	bucketWatchedAddrs = []byte("watched_addrs")
 	bucketUTXOSet      = []byte("utxo_set")
 	bucketRescanMeta   = []byte("rescan_meta")
+	// bucketTxHistory stores confirmed watched-transaction records so clients
+	// can reconstruct wallet history. Keys are BigEndian(height) || txid, so a
+	// cursor Seek gives records above a given height in chronological order.
+	bucketTxHistory = []byte("tx_history")
 
 	// Keys within the rescan_meta bucket.
 	keyLastScannedTip  = []byte("last_scanned_tip")
@@ -50,7 +54,7 @@ func OpenStateStore(dataDir string, logger btclog.Logger) (*StateStore, error) {
 
 	// Create buckets if they don't exist.
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range [][]byte{bucketWatchedAddrs, bucketUTXOSet, bucketRescanMeta} {
+		for _, bucket := range [][]byte{bucketWatchedAddrs, bucketUTXOSet, bucketRescanMeta, bucketTxHistory} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return fmt.Errorf("failed to create bucket %s: %w", string(bucket), err)
 			}
@@ -150,6 +154,99 @@ func (s *StateStore) LoadUTXOSet() (map[string]UTXO, error) {
 	return utxos, nil
 }
 
+// --- Transaction History ---
+
+// SaveTxHistory persists a confirmed watched-transaction record. Idempotent:
+// re-saving the same (height, txid) overwrites the record.
+func (s *StateStore) SaveTxHistory(rec TxHistoryRecord) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketTxHistory)
+		data, err := json.Marshal(rec)
+		if err != nil {
+			return fmt.Errorf("failed to marshal tx history %s: %w", rec.TxID, err)
+		}
+		return b.Put(txHistoryKey(rec.Height, rec.TxID), data)
+	})
+}
+
+// SaveTxHistoryBatch persists many records in a single transaction.
+func (s *StateStore) SaveTxHistoryBatch(recs []TxHistoryRecord) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketTxHistory)
+		for _, rec := range recs {
+			data, err := json.Marshal(rec)
+			if err != nil {
+				return fmt.Errorf("failed to marshal tx history %s: %w", rec.TxID, err)
+			}
+			if err := b.Put(txHistoryKey(rec.Height, rec.TxID), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// LoadTxHistorySince returns confirmed records with height strictly greater
+// than sinceHeight, in ascending (height, txid) order.
+func (s *StateStore) LoadTxHistorySince(sinceHeight int32) ([]TxHistoryRecord, error) {
+	var out []TxHistoryRecord
+	err := s.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketTxHistory).Cursor()
+		seek := make([]byte, 4)
+		// Records are keyed by height; seek to the first key at height+1 so
+		// the result set is strictly above sinceHeight.
+		binary.BigEndian.PutUint32(seek, uint32(sinceHeight+1))
+		for k, v := c.Seek(seek); k != nil; k, v = c.Next() {
+			var rec TxHistoryRecord
+			if err := json.Unmarshal(v, &rec); err != nil {
+				s.logger.Warnf("Skipping corrupt tx history entry %x: %v", k, err)
+				continue
+			}
+			out = append(out, rec)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to load tx history: %w", err)
+	}
+	return out, nil
+}
+
+// DeleteTxHistoryFrom removes confirmed records at or above fromHeight. Used on
+// a reorg re-scan so stale records for orphaned blocks do not linger.
+func (s *StateStore) DeleteTxHistoryFrom(fromHeight int32) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketTxHistory)
+		c := b.Cursor()
+		seek := make([]byte, 4)
+		binary.BigEndian.PutUint32(seek, uint32(fromHeight))
+		var keys [][]byte
+		for k, _ := c.Seek(seek); k != nil; k, _ = c.Next() {
+			key := make([]byte, len(k))
+			copy(key, k)
+			keys = append(keys, key)
+		}
+		for _, k := range keys {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// txHistoryKey builds the bbolt key BigEndian(height) || txid so records sort
+// by height first (enabling cursor range scans) then by txid.
+func txHistoryKey(height int32, txid string) []byte {
+	key := make([]byte, 4+len(txid))
+	binary.BigEndian.PutUint32(key[:4], uint32(height))
+	copy(key[4:], txid)
+	return key
+}
+
 // --- Rescan Metadata ---
 
 // SaveRescanMeta persists the last scanned tip and start height.
@@ -176,7 +273,7 @@ func (s *StateStore) SaveRescanMeta(lastScannedTip, lastStartHeight int32) error
 // previously watched address information to a new client.
 func (s *StateStore) ClearPrivacyData() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range [][]byte{bucketWatchedAddrs, bucketUTXOSet, bucketRescanMeta} {
+		for _, bucket := range [][]byte{bucketWatchedAddrs, bucketUTXOSet, bucketRescanMeta, bucketTxHistory} {
 			if err := tx.DeleteBucket(bucket); err != nil {
 				return fmt.Errorf("failed to delete bucket %s: %w", string(bucket), err)
 			}
