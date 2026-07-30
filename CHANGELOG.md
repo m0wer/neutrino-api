@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add an optional `force` flag to `POST /v1/rescan` for evaluating an
+  already-covered historical range against newly watched addresses. Forced
+  scans over an explicit address subset do not modify the persisted
+  `last_start_height`/`last_scanned_tip` coverage metadata. Capability
+  support is advertised as `force_rescan_supported` in
+  `GET /v1/rescan/status`.
+
+### Changed
+
+- Rescans are now admitted synchronously and serialized: `POST /v1/rescan`
+  marks the scan in-progress before responding, rejects overlapping requests
+  with HTTP `409`, and surfaces asynchronous scan failures through the
+  status endpoint's `last_error` field. Previously each request spawned an
+  independent goroutine, which could interleave coverage metadata updates
+  and persist a stale UTXO snapshot.
+
 ## [1.4.0] - 2026-07-13
 
 ### Added

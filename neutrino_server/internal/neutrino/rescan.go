@@ -40,6 +40,11 @@ type RescanManager struct {
 	// Non-zero means a rescan goroutine is running.
 	rescanInProgress atomic.Int32
 
+	// autoSyncRetry records that an auto-sync pass was skipped because a
+	// rescan owned the slot; the pass is re-run when the slot is released
+	// so notification-driven catch-up work is never silently dropped.
+	autoSyncRetry atomic.Bool
+
 	statusMu sync.RWMutex
 	status   RescanStatus
 
@@ -358,8 +363,14 @@ func (r *RescanManager) runAutoSyncPass() {
 
 	watchedCount := r.WatchedAddressCount()
 
-	if !shouldAutoSync(isCurrent, watchedCount, bestBlock.Height, lastTip,
-		r.IsRescanInProgress()) {
+	inProgress := r.IsRescanInProgress()
+	if !shouldAutoSync(isCurrent, watchedCount, bestBlock.Height, lastTip, inProgress) {
+		if autoSyncRetryNeeded(isCurrent, watchedCount, bestBlock.Height, lastTip, inProgress) {
+			// Another scan owns the slot right now. Remember this pass so
+			// the catch-up runs when the slot is released; the triggering
+			// block notification has already been consumed.
+			r.autoSyncRetry.Store(true)
+		}
 		return
 	}
 
@@ -376,8 +387,23 @@ func (r *RescanManager) runAutoSyncPass() {
 		bestBlock.Height, lastTip, watchedCount)
 
 	if err := r.Rescan(startHeight, nil); err != nil {
+		if errors.Is(err, ErrRescanBusy) {
+			// Lost the admission race after the in-progress check; retry
+			// once the winning scan releases the slot.
+			r.autoSyncRetry.Store(true)
+		}
 		r.logger.Warnf("Auto-sync: incremental rescan failed: %v", err)
 	}
+}
+
+// autoSyncRetryNeeded reports whether a skipped auto-sync pass must be
+// retried after the currently running scan releases the slot: every trigger
+// condition holds except that a scan is in progress.
+func autoSyncRetryNeeded(isCurrent bool, watchedCount int,
+	chainTip, lastScannedTip int32, rescanInProgress bool,
+) bool {
+	return rescanInProgress &&
+		shouldAutoSync(isCurrent, watchedCount, chainTip, lastScannedTip, false)
 }
 
 // WatchAddress adds an address to the watch list.
@@ -464,15 +490,78 @@ func (r *RescanManager) GetRescanStatus() RescanStatus {
 	return status
 }
 
+// ErrRescanBusy is returned when a rescan is requested while another rescan
+// is still running. Rescans are serialized because they share the global
+// coverage metadata and the persisted UTXO snapshot.
+var ErrRescanBusy = errors.New("a rescan is already in progress")
+
+// rescanJob describes a validated and admitted rescan operation.
+type rescanJob struct {
+	startHeight    int32
+	addrs          []btcutil.Address
+	updateCoverage bool
+	force          bool
+}
+
 // Rescan triggers a rescan from the given height for specified addresses.
 // If addresses is empty, all watched addresses are used.
 // This uses neutrino's block filter-based scanning.
 func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
-	// Add addresses to watch list and collect btcutil.Address objects
+	job, err := r.beginRescan(startHeight, addresses, false)
+	if err != nil || job == nil {
+		return err
+	}
+	return r.runRescanJob(job)
+}
+
+// ForceRescan rescans the requested range even when global persisted coverage
+// already includes it. This is required when callers add addresses after the
+// original scan and need historical blocks evaluated against the new scripts.
+func (r *RescanManager) ForceRescan(startHeight int32, addresses []string) error {
+	job, err := r.beginRescan(startHeight, addresses, true)
+	if err != nil || job == nil {
+		return err
+	}
+	return r.runRescanJob(job)
+}
+
+// StartRescan validates and admits a rescan synchronously, then runs it in
+// the background. When this returns nil the in-progress flag is already set,
+// so callers can immediately poll GetRescanStatus for completion and
+// last_error without racing the scan startup.
+func (r *RescanManager) StartRescan(startHeight int32, addresses []string, force bool) error {
+	job, err := r.beginRescan(startHeight, addresses, force)
+	if err != nil || job == nil {
+		return err
+	}
+	go func() {
+		if err := r.runRescanJob(job); err != nil {
+			r.logger.Errorf("Background rescan failed: %v", err)
+		}
+	}()
+	return nil
+}
+
+// beginRescan validates the request, reserves the single rescan slot, and
+// records the started lifecycle status. It returns (nil, nil) when there is
+// nothing to scan.
+func (r *RescanManager) beginRescan(startHeight int32, addresses []string, force bool) (*rescanJob, error) {
+	// Serialize scans before any side effects: a busy rejection must not
+	// leave requested addresses in the watched set without their
+	// historical scan. Concurrent scans would also interleave updates to
+	// the shared coverage metadata, and a slower scan could persist a
+	// stale UTXO snapshot over a newer one.
+	if !r.rescanInProgress.CompareAndSwap(0, 1) {
+		return nil, ErrRescanBusy
+	}
+	releaseSlot := func() { r.releaseRescanSlot() }
+
+	// Add addresses to watch list and collect btcutil.Address objects.
 	addrs := make([]btcutil.Address, 0, len(addresses))
 	for _, addrStr := range addresses {
 		if err := r.WatchAddress(addrStr); err != nil {
-			return err
+			releaseSlot()
+			return nil, err
 		}
 		r.mu.RLock()
 		addr := r.watchedAddrs[addrStr]
@@ -481,7 +570,8 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 	}
 
 	// Fall back to all watched addresses when none are explicitly provided.
-	if len(addrs) == 0 {
+	explicit := len(addrs) > 0
+	if !explicit {
 		r.mu.RLock()
 		for _, addr := range r.watchedAddrs {
 			addrs = append(addrs, addr)
@@ -490,32 +580,25 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 
 		if len(addrs) == 0 {
 			r.logger.Warn("Rescan called with no addresses and no watched addresses — nothing to scan")
-			return nil
+			releaseSlot()
+			return nil, nil
 		}
 		r.logger.Infof("Rescan called with no explicit addresses, using %d watched addresses", len(addrs))
 	}
 
-	// Now that we know we have addresses to scan, verify chain service is available.
 	if r.chainService == nil {
-		return errors.New("chain service not initialized")
+		releaseSlot()
+		return nil, errors.New("chain service not initialized")
 	}
 
-	r.logger.Infof("Starting rescan from height %d for %d addresses", startHeight, len(addrs))
-
-	// Determine effective start height: skip already-scanned ranges when possible.
-	// If we have a persisted tip AND the requested start height falls within the
-	// range we already scanned (startHeight >= LastStartHeight), we can resume
-	// from LastScannedTip+1 instead of re-scanning the entire range.
-	effectiveStart := startHeight
-	r.statusMu.RLock()
-	persistedTip := r.status.LastScannedTip
-	persistedStart := r.status.LastStartHeight
-	r.statusMu.RUnlock()
-
-	if persistedTip > 0 && startHeight >= persistedStart && effectiveStart <= persistedTip {
-		effectiveStart = persistedTip + 1
-		r.logger.Infof("Incremental rescan: skipping already-scanned range %d..%d, resuming from %d",
-			startHeight, persistedTip, effectiveStart)
+	job := &rescanJob{
+		startHeight: startHeight,
+		addrs:       addrs,
+		// A forced scan over explicitly supplied addresses backfills only
+		// that subset, so it must not modify the global coverage metadata
+		// that describes the whole watched set.
+		updateCoverage: updatesGlobalCoverage(force, explicit),
+		force:          force,
 	}
 
 	r.statusMu.Lock()
@@ -527,20 +610,54 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 	// historical coverage record and force a full re-scan on next CLI
 	// invocation. Only widen coverage (lower the recorded start) -- never
 	// narrow it.
-	if r.status.LastStartHeight == 0 || startHeight < r.status.LastStartHeight {
+	if job.updateCoverage &&
+		(r.status.LastStartHeight == 0 || startHeight < r.status.LastStartHeight) {
 		r.status.LastStartHeight = startHeight
 	}
 	r.status.LastError = ""
 	r.statusMu.Unlock()
 
-	// Mark rescan as in-progress so callers can poll /v1/rescan/status.
-	r.rescanInProgress.Add(1)
-	defer r.rescanInProgress.Add(-1)
+	r.logger.Infof(
+		"Starting rescan from height %d for %d addresses (force=%t)",
+		startHeight, len(addrs), force,
+	)
+	return job, nil
+}
 
-	// Get current best block
+// releaseRescanSlot frees the single rescan slot and replays a pending
+// auto-sync pass that was skipped while the slot was held.
+func (r *RescanManager) releaseRescanSlot() {
+	r.rescanInProgress.Store(0)
+	if r.autoSyncRetry.Swap(false) {
+		go r.runAutoSyncPass()
+	}
+}
+
+// runRescanJob executes an admitted rescan and releases the rescan slot.
+func (r *RescanManager) runRescanJob(job *rescanJob) error {
+	defer r.releaseRescanSlot()
+
+	// Determine effective start height: skip already-scanned ranges when possible.
+	// If we have a persisted tip AND the requested start height falls within the
+	// range we already scanned (startHeight >= LastStartHeight), we can resume
+	// from LastScannedTip+1 instead of re-scanning the entire range.
+	r.statusMu.RLock()
+	persistedTip := r.status.LastScannedTip
+	persistedStart := r.status.LastStartHeight
+	r.statusMu.RUnlock()
+	effectiveStart := effectiveRescanStart(job.startHeight, persistedStart, persistedTip, job.force)
+
+	if effectiveStart != job.startHeight {
+		r.logger.Infof("Incremental rescan: skipping already-scanned range %d..%d, resuming from %d",
+			job.startHeight, persistedTip, effectiveStart)
+	}
+
+	// Get current best block.
 	bestBlock, err := r.chainService.BestBlock()
 	if err != nil {
-		return fmt.Errorf("failed to get best block: %w", err)
+		err = fmt.Errorf("failed to get best block: %w", err)
+		r.recordRescanFailure(err)
+		return err
 	}
 
 	// If effective start is already past the tip, nothing to scan.
@@ -549,7 +666,9 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 			effectiveStart, bestBlock.Height)
 		r.statusMu.Lock()
 		r.status.LastFinished = time.Now().Unix()
-		r.status.LastScannedTip = bestBlock.Height
+		if job.updateCoverage {
+			r.status.LastScannedTip = bestBlock.Height
+		}
 		r.statusMu.Unlock()
 		r.persistState()
 		// No blocks were scanned, so nothing in the watched mempool
@@ -558,10 +677,12 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 	}
 
 	// Scan blocks from effectiveStart to bestBlock.Height
-	confirmedTxids, err := r.scanBlocks(effectiveStart, bestBlock.Height, addrs)
+	confirmedTxids, err := r.scanBlocks(effectiveStart, bestBlock.Height, job.addrs)
 	r.statusMu.Lock()
 	r.status.LastFinished = time.Now().Unix()
-	r.status.LastScannedTip = bestBlock.Height
+	if job.updateCoverage {
+		r.status.LastScannedTip = bestBlock.Height
+	}
 	if err != nil {
 		r.status.LastError = err.Error()
 	}
@@ -580,6 +701,29 @@ func (r *RescanManager) Rescan(startHeight int32, addresses []string) error {
 	}
 
 	return err
+}
+
+// recordRescanFailure surfaces an asynchronous scan failure to status pollers.
+func (r *RescanManager) recordRescanFailure(err error) {
+	r.statusMu.Lock()
+	r.status.LastFinished = time.Now().Unix()
+	r.status.LastError = err.Error()
+	r.statusMu.Unlock()
+}
+
+func effectiveRescanStart(startHeight, persistedStart, persistedTip int32, force bool) int32 {
+	if !force && persistedTip > 0 && startHeight >= persistedStart && startHeight <= persistedTip {
+		return persistedTip + 1
+	}
+	return startHeight
+}
+
+// updatesGlobalCoverage reports whether a scan may update the persisted
+// last_start_height/last_scanned_tip coverage metadata. Forced scans over an
+// explicit address subset must not, because only those addresses were
+// evaluated over the requested range.
+func updatesGlobalCoverage(force bool, explicitAddresses bool) bool {
+	return !force || !explicitAddresses
 }
 
 // persistState saves the current UTXO set and rescan metadata to the store.

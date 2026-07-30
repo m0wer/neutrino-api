@@ -26,6 +26,7 @@ type mockNode struct {
 	mempoolStats func() neutrino.MempoolStats
 	getStatus    func() neutrino.Status
 	txHistory    func(sinceHeight int32) (neutrino.TxHistoryResponse, error)
+	startRescan  func(startHeight int32, addresses []string, force bool) error
 }
 
 func (m *mockNode) GetStatus() neutrino.Status {
@@ -86,7 +87,10 @@ func (m *mockNode) WatchAddress(address string) error {
 	return nil
 }
 
-func (m *mockNode) Rescan(startHeight int32, addresses []string) error {
+func (m *mockNode) StartRescan(startHeight int32, addresses []string, force bool) error {
+	if m.startRescan != nil {
+		return m.startRescan(startHeight, addresses, force)
+	}
 	return nil
 }
 
@@ -369,8 +373,20 @@ func TestErrorResponse(t *testing.T) {
 func TestHandleRescan_Success(t *testing.T) {
 	backend := btclog.NewBackend(os.Stdout)
 	logger := backend.Logger("TEST")
+	called := false
 
-	handler := NewHandler(&mockNode{}, logger)
+	handler := NewHandler(&mockNode{
+		startRescan: func(startHeight int32, addresses []string, force bool) error {
+			if startHeight != 100 {
+				t.Errorf("expected start height 100, got %d", startHeight)
+			}
+			if force {
+				t.Error("expected force=false for a plain rescan request")
+			}
+			called = true
+			return nil
+		},
+	}, logger)
 
 	router := mux.NewRouter()
 	router.HandleFunc("/v1/rescan", handler.handleRescan).Methods("POST")
@@ -400,6 +416,74 @@ func TestHandleRescan_Success(t *testing.T) {
 
 	if response["status"] != "started" {
 		t.Errorf("expected status 'started', got %v", response["status"])
+	}
+
+	if !called {
+		t.Fatal("rescan admission was not dispatched synchronously")
+	}
+}
+
+func TestHandleRescan_Force(t *testing.T) {
+	called := false
+	handler := NewHandler(&mockNode{
+		startRescan: func(startHeight int32, addresses []string, force bool) error {
+			if startHeight != 0 {
+				t.Errorf("expected start height 0, got %d", startHeight)
+			}
+			if !force {
+				t.Error("expected force=true")
+			}
+			called = true
+			return nil
+		},
+	}, newTestLogger())
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/rescan", handler.handleRescan).Methods("POST")
+
+	reqBody := map[string]any{
+		"start_height": 0,
+		"addresses":    []string{"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"},
+		"force":        true,
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/rescan", bytes.NewReader(jsonBody))
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+	if !called {
+		t.Fatal("forced rescan admission was not dispatched synchronously")
+	}
+}
+
+func TestHandleRescan_Busy(t *testing.T) {
+	handler := NewHandler(&mockNode{
+		startRescan: func(startHeight int32, addresses []string, force bool) error {
+			return neutrino.ErrRescanBusy
+		},
+	}, newTestLogger())
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/rescan", handler.handleRescan).Methods("POST")
+
+	reqBody := map[string]any{
+		"start_height": 0,
+		"addresses":    []string{"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"},
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/rescan", bytes.NewReader(jsonBody))
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d", rr.Code)
 	}
 }
 
@@ -687,6 +771,9 @@ func TestHandleGetRescanStatus_NotInProgress(t *testing.T) {
 	}
 	if _, ok := response["last_scanned_tip"]; !ok {
 		t.Error("expected last_scanned_tip in response")
+	}
+	if supported, ok := response["force_rescan_supported"].(bool); !ok || !supported {
+		t.Errorf("expected force_rescan_supported=true, got %v", response["force_rescan_supported"])
 	}
 	if watched, ok := response["watched_addresses"].(float64); !ok || int(watched) != 3 {
 		t.Errorf("expected watched_addresses=3, got %v", response["watched_addresses"])

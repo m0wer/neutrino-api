@@ -503,6 +503,33 @@ curl -X POST http://localhost:8334/v1/rescan \
   }'
 ```
 
+Rescans normally skip ranges already covered by persisted global scan state.
+When adding addresses after that scan, set `"force": true` to evaluate the
+requested historical range against the new scripts instead of resuming from
+the persisted tip:
+
+```bash
+curl -X POST http://localhost:8334/v1/rescan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "start_height": 0,
+    "addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"],
+    "force": true
+  }'
+```
+
+`GET /v1/rescan/status` advertises this capability as
+`"force_rescan_supported": true`. Forced rescans can be expensive on long
+chains and should be limited to newly watched addresses.
+
+Rescan requests are admitted synchronously and serialized: when the POST
+returns `{"status": "started"}` the status endpoint already reports
+`in_progress: true`, and a request that overlaps a running scan is rejected
+with HTTP `409`. Asynchronous scan failures are surfaced through the status
+endpoint's `last_error` field. A forced scan over an explicit address subset
+does not modify the persisted `last_start_height`/`last_scanned_tip`
+coverage metadata, because only that subset was evaluated over the range.
+
 ### Peers
 
 Get connected peer information:

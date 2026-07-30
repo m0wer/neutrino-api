@@ -719,6 +719,24 @@ func (n *Node) Rescan(startHeight int32, addresses []string) error {
 	return n.rescanMgr.Rescan(startHeight, addresses)
 }
 
+// ForceRescan triggers a historical rescan without applying persisted-range skipping.
+func (n *Node) ForceRescan(startHeight int32, addresses []string) error {
+	if n.rescanMgr == nil {
+		return errors.New("rescan manager not initialized")
+	}
+
+	return n.rescanMgr.ForceRescan(startHeight, addresses)
+}
+
+// StartRescan admits a rescan synchronously and runs it in the background.
+func (n *Node) StartRescan(startHeight int32, addresses []string, force bool) error {
+	if n.rescanMgr == nil {
+		return errors.New("rescan manager not initialized")
+	}
+
+	return n.rescanMgr.StartRescan(startHeight, addresses, force)
+}
+
 // IsRescanInProgress returns true if a rescan is currently running.
 func (n *Node) IsRescanInProgress() bool {
 	if n.rescanMgr == nil {

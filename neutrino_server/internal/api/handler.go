@@ -29,7 +29,7 @@ type NodeInterface interface {
 	GetUTXOs(addresses []string) ([]neutrino.UTXO, error)
 	GetUTXO(txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
 	WatchAddress(address string) error
-	Rescan(startHeight int32, addresses []string) error
+	StartRescan(startHeight int32, addresses []string, force bool) error
 	IsRescanInProgress() bool
 	RescanStatus() neutrino.RescanStatus
 
@@ -480,6 +480,7 @@ func (h *Handler) handleRescan(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		StartHeight int32    `json:"start_height"`
 		Addresses   []string `json:"addresses"`
+		Force       bool     `json:"force"`
 		Outpoints   []struct {
 			TxID string `json:"txid"`
 			Vout uint32 `json:"vout"`
@@ -491,15 +492,20 @@ func (h *Handler) handleRescan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Infof("Rescan requested: start_height=%d, addresses=%d, outpoints=%d",
-		req.StartHeight, len(req.Addresses), len(req.Outpoints))
+	h.logger.Infof("Rescan requested: start_height=%d, addresses=%d, outpoints=%d, force=%t",
+		req.StartHeight, len(req.Addresses), len(req.Outpoints), req.Force)
 
-	// Start rescan in background goroutine to not block HTTP response
-	go func() {
-		if err := h.node.Rescan(req.StartHeight, req.Addresses); err != nil {
-			h.logger.Errorf("Rescan failed: %v", err)
+	// Admission is synchronous: the in-progress flag is already set when this
+	// returns, so clients can poll /v1/rescan/status without racing startup.
+	// The scan itself runs in the background inside the node.
+	if err := h.node.StartRescan(req.StartHeight, req.Addresses, req.Force); err != nil {
+		if errors.Is(err, neutrino.ErrRescanBusy) {
+			h.errorResponse(w, http.StatusConflict, err.Error())
+			return
 		}
-	}()
+		h.errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	h.jsonResponse(w, map[string]string{
 		"status": "started",
@@ -511,14 +517,15 @@ func (h *Handler) handleGetRescanStatus(w http.ResponseWriter, r *http.Request) 
 	nodeStatus := h.node.GetStatus()
 	status := h.node.RescanStatus()
 	h.jsonResponse(w, map[string]any{
-		"in_progress":       status.InProgress,
-		"last_started":      status.LastStarted,
-		"last_finished":     status.LastFinished,
-		"last_start_height": status.LastStartHeight,
-		"last_scanned_tip":  status.LastScannedTip,
-		"last_error":        status.LastError,
-		"watched_addresses": nodeStatus.WatchedAddresses,
-		"server_version":    h.effectiveVersion(),
+		"in_progress":            status.InProgress,
+		"last_started":           status.LastStarted,
+		"last_finished":          status.LastFinished,
+		"last_start_height":      status.LastStartHeight,
+		"last_scanned_tip":       status.LastScannedTip,
+		"last_error":             status.LastError,
+		"force_rescan_supported": true,
+		"watched_addresses":      nodeStatus.WatchedAddresses,
+		"server_version":         h.effectiveVersion(),
 	})
 }
 

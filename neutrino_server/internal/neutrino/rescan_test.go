@@ -1,6 +1,7 @@
 package neutrino
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -608,6 +609,231 @@ func TestRescanIncrementalSkip(t *testing.T) {
 	// Verify that LastStartHeight was set correctly.
 	if mgr.status.LastStartHeight != 243542 {
 		t.Errorf("expected LastStartHeight=243542, got %d", mgr.status.LastStartHeight)
+	}
+}
+
+// TestRescanBusyRejected asserts that overlapping rescans are refused instead
+// of interleaving updates to shared coverage metadata and persisted state.
+func TestRescanBusyRejected(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+	addr, _ := btcutil.DecodeAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &chaincfg.MainNetParams)
+	mgr.watchedAddrs["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"] = addr
+
+	// Simulate a running scan holding the single rescan slot.
+	mgr.rescanInProgress.Store(1)
+
+	err := mgr.Rescan(0, []string{"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"})
+	if !errors.Is(err, ErrRescanBusy) {
+		t.Fatalf("expected ErrRescanBusy, got %v", err)
+	}
+	if !mgr.IsRescanInProgress() {
+		t.Fatal("busy rejection must not release the running scan's slot")
+	}
+}
+
+// TestRescanNilChainServiceReleasesSlot asserts that admission failures do not
+// leave the rescan slot permanently reserved.
+func TestRescanNilChainServiceReleasesSlot(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+
+	err := mgr.Rescan(0, []string{"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"})
+	if err == nil || err.Error() != "chain service not initialized" {
+		t.Fatalf("expected chain service error, got %v", err)
+	}
+	if mgr.IsRescanInProgress() {
+		t.Fatal("failed admission must release the rescan slot")
+	}
+}
+
+// TestForcedSubsetScanPreservesCoverageFloor asserts that a forced scan over
+// explicitly supplied addresses does not widen last_start_height: only that
+// subset was evaluated, so global coverage metadata must stay untouched.
+func TestForcedSubsetScanPreservesCoverageFloor(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+	mgr.status.LastStartHeight = 500
+	mgr.status.LastScannedTip = 900
+
+	job, err := mgr.beginRescan(0, []string{"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"}, true)
+	if err == nil {
+		t.Fatalf("expected chain service admission failure, got job=%v", job)
+	}
+	// Metadata is only mutated after full admission; a forced subset request
+	// must never have widened the floor even transiently.
+	if mgr.status.LastStartHeight != 500 || mgr.status.LastScannedTip != 900 {
+		t.Fatalf("coverage metadata changed: start=%d tip=%d",
+			mgr.status.LastStartHeight, mgr.status.LastScannedTip)
+	}
+}
+
+// TestAutoSyncRetryNeeded asserts that a skipped auto-sync pass is retried
+// exactly when a running scan was the only blocker.
+func TestAutoSyncRetryNeeded(t *testing.T) {
+	tests := []struct {
+		name       string
+		isCurrent  bool
+		watched    int
+		chainTip   int32
+		lastTip    int32
+		inProgress bool
+		want       bool
+	}{
+		{
+			name:      "retry when only blocked by a running scan",
+			isCurrent: true, watched: 5, chainTip: 200, lastTip: 100,
+			inProgress: true, want: true,
+		},
+		{
+			name:      "no retry when idle (pass runs directly)",
+			isCurrent: true, watched: 5, chainTip: 200, lastTip: 100,
+			inProgress: false, want: false,
+		},
+		{
+			name:      "no retry when chain tip already covered",
+			isCurrent: true, watched: 5, chainTip: 100, lastTip: 100,
+			inProgress: true, want: false,
+		},
+		{
+			name:      "no retry when nothing is watched",
+			isCurrent: true, watched: 0, chainTip: 200, lastTip: 100,
+			inProgress: true, want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := autoSyncRetryNeeded(
+				tt.isCurrent, tt.watched, tt.chainTip, tt.lastTip, tt.inProgress,
+			)
+			if got != tt.want {
+				t.Fatalf("autoSyncRetryNeeded(...) = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRescanBusyHasNoSideEffects asserts that a busy rejection does not add
+// the requested addresses to the watched set.
+func TestRescanBusyHasNoSideEffects(t *testing.T) {
+	backend := btclog.NewBackend(os.Stdout)
+	logger := backend.Logger("TEST")
+
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]btcutil.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+	mgr.rescanInProgress.Store(1)
+
+	err := mgr.Rescan(0, []string{"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"})
+	if !errors.Is(err, ErrRescanBusy) {
+		t.Fatalf("expected ErrRescanBusy, got %v", err)
+	}
+	if mgr.WatchedAddressCount() != 0 {
+		t.Fatal("busy rejection must not add addresses to the watched set")
+	}
+}
+
+func TestUpdatesGlobalCoverage(t *testing.T) {
+	tests := []struct {
+		name     string
+		force    bool
+		explicit bool
+		want     bool
+	}{
+		{name: "normal full scan updates coverage", force: false, explicit: false, want: true},
+		{name: "normal subset scan updates coverage", force: false, explicit: true, want: true},
+		{name: "forced full scan updates coverage", force: true, explicit: false, want: true},
+		{name: "forced subset scan keeps coverage untouched", force: true, explicit: true, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := updatesGlobalCoverage(test.force, test.explicit); got != test.want {
+				t.Fatalf("updatesGlobalCoverage(%t, %t) = %t, want %t",
+					test.force, test.explicit, got, test.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveRescanStart(t *testing.T) {
+	tests := []struct {
+		name           string
+		startHeight    int32
+		persistedStart int32
+		persistedTip   int32
+		force          bool
+		want           int32
+	}{
+		{
+			name:           "incremental scan skips covered range",
+			startHeight:    100,
+			persistedStart: 100,
+			persistedTip:   500,
+			want:           501,
+		},
+		{
+			name:           "forced scan keeps covered start",
+			startHeight:    100,
+			persistedStart: 100,
+			persistedTip:   500,
+			force:          true,
+			want:           100,
+		},
+		{
+			name:           "forced genesis scan remains valid",
+			startHeight:    0,
+			persistedStart: 0,
+			persistedTip:   500,
+			force:          true,
+			want:           0,
+		},
+		{
+			name:           "earlier range already bypasses skip",
+			startHeight:    50,
+			persistedStart: 100,
+			persistedTip:   500,
+			want:           50,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := effectiveRescanStart(
+				test.startHeight,
+				test.persistedStart,
+				test.persistedTip,
+				test.force,
+			)
+			if got != test.want {
+				t.Fatalf("effectiveRescanStart() = %d, want %d", got, test.want)
+			}
+		})
 	}
 }
 
