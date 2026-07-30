@@ -226,7 +226,7 @@ func (n *Node) Start() error {
 	// Open the database for neutrino
 	dbPath := filepath.Join(n.config.DataDir, "neutrino.db")
 	n.logger.Infof("Opening database at: %s", dbPath)
-	db, err := walletdb.Create("bdb", dbPath, true, 60*time.Second)
+	db, err := walletdb.Create("bdb", dbPath, true, 60*time.Second, false)
 	if err != nil {
 		return fmt.Errorf("failed to create database at %s: %w", dbPath, err)
 	}

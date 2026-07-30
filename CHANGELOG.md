@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status endpoint's `last_error` field. Previously each request spawned an
   independent goroutine, which could interleave coverage metadata updates
   and persist a stale UTXO snapshot.
+- Bump the declared upstream `lightninglabs/neutrino` baseline from v0.16.0
+  to v0.17.1, matching the `m0wer/neutrino` fork commit the build already
+  uses (the fork is rebased on upstream v0.17.1).
+- Update all other Go dependencies to their latest compatible versions,
+  notably `btcd` v0.25.0, `btcutil` v1.2.0, `walletdb` v1.6.0, `bbolt`
+  v1.5.0, and `golang.org/x/net` v0.57.0. `btcd` stays below v0.26 because
+  that release moves `wire`, `chaincfg`, and `txscript` into separate `/v2`
+  modules, and `wtxmgr` stays at v1.5.0 because newer versions depend on the
+  restructured `btcd`. The `walletdb.Create` call was adapted to the new
+  bdb driver signature, which now requires an explicit read-only flag.
+- Pin Go 1.25.11 in the reproducible release build scripts and release
+  workflow, required by the updated `walletdb` dependency.
 
 ## [1.4.0] - 2026-07-13
 
