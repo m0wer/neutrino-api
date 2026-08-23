@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Detect database-index/flat-file inconsistencies in Neutrino's rebuildable
+  header cache before startup. By default, the daemon preserves the three
+  coupled cache files in a timestamped recovery directory and resyncs public
+  chain data from genesis while retaining credentials and wallet rescan state.
+  Set `AUTO_RECOVER_HEADER_CACHE=false` to require manual recovery instead.
+
 ## [1.5.0] - 2026-07-30
 
 ### Added

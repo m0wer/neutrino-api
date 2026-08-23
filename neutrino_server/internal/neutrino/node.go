@@ -83,6 +83,11 @@ type Config struct {
 	// records during scanning so clients can reconstruct wallet history via
 	// GET /v1/transactions. Defaults to true.
 	TxHistoryEnabled bool
+
+	// AutoRecoverHeaderCache rebuilds Neutrino's public chain cache when
+	// startup detects that its database index and flat header files diverged.
+	// Application state and credentials are not part of this cache.
+	AutoRecoverHeaderCache bool
 }
 
 // Node wraps a neutrino ChainService with additional functionality.
@@ -226,11 +231,9 @@ func (n *Node) Start() error {
 	// Open the database for neutrino
 	dbPath := filepath.Join(n.config.DataDir, "neutrino.db")
 	n.logger.Infof("Opening database at: %s", dbPath)
-	db, err := walletdb.Create("bdb", dbPath, true, 60*time.Second, false)
-	if err != nil {
-		return fmt.Errorf("failed to create database at %s: %w", dbPath, err)
+	if err := n.openChainDatabase(dbPath); err != nil {
+		return err
 	}
-	n.db = db
 
 	// Configure logging for the neutrino library itself
 	logLevel := n.config.LogLevel
@@ -337,6 +340,67 @@ func (n *Node) Start() error {
 
 	n.logger.Info("Neutrino node started")
 	return nil
+}
+
+func (n *Node) openChainDatabase(dbPath string) error {
+	db, err := walletdb.Create("bdb", dbPath, true, 60*time.Second, false)
+	if err != nil {
+		return fmt.Errorf("failed to create database at %s: %w", dbPath, err)
+	}
+	n.db = db
+
+	inspectionErr := inspectHeaderCache(n.config.DataDir, n.db)
+	if inspectionErr == nil {
+		return nil
+	}
+
+	var inconsistency *headerCacheInconsistency
+	if !errors.As(inspectionErr, &inconsistency) {
+		if closeErr := n.closeChainDatabase(); closeErr != nil {
+			return fmt.Errorf(
+				"failed to inspect header cache (%v) and close chain database: %w",
+				inspectionErr, closeErr,
+			)
+		}
+		return fmt.Errorf("failed to inspect header cache: %w", inspectionErr)
+	}
+	if !n.config.AutoRecoverHeaderCache {
+		if closeErr := n.closeChainDatabase(); closeErr != nil {
+			return fmt.Errorf(
+				"header cache is inconsistent (%v), automatic recovery is disabled, and the database failed to close: %w",
+				inspectionErr, closeErr,
+			)
+		}
+		return fmt.Errorf(
+			"header cache is inconsistent and automatic recovery is disabled: %w",
+			inspectionErr,
+		)
+	}
+
+	n.logger.Warnf("Header cache is inconsistent: %v", inspectionErr)
+	n.logger.Warn("Quarantining rebuildable chain cache and resyncing from genesis")
+	if err := n.closeChainDatabase(); err != nil {
+		return fmt.Errorf("close inconsistent chain database: %w", err)
+	}
+
+	recoveryDir, err := quarantineHeaderCache(n.config.DataDir, time.Now())
+	if err != nil {
+		return fmt.Errorf("quarantine inconsistent header cache: %w", err)
+	}
+	n.logger.Warnf("Inconsistent header cache preserved at %s", recoveryDir)
+
+	db, err = walletdb.Create("bdb", dbPath, true, 60*time.Second, false)
+	if err != nil {
+		return fmt.Errorf("create fresh database after header cache recovery: %w", err)
+	}
+	n.db = db
+	return nil
+}
+
+func (n *Node) closeChainDatabase() error {
+	err := n.db.Close()
+	n.db = nil
+	return err
 }
 
 // startChainService creates and starts a neutrino.ChainService.

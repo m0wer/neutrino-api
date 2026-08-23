@@ -114,6 +114,7 @@ Anyone can reproduce and verify a release locally with one command:
 | `AUTO_SYNC_INTERVAL_SEC` | `30` | Fallback poll interval (in seconds) used while waiting for initial header sync, and as a safety net if block-notification subscription is unavailable. Only used when `AUTO_SYNC_WATCHED=true` |
 | `MEMPOOL_ENABLED` | `true` | Enable the watched-only mempool tracker. The daemon subscribes to every connected peer's incoming `inv` messages, fetches each announced tx, and records the ones that pay or spend a watched address. Unconfirmed UTXOs are surfaced in `/v1/utxos` (with `height: 0`) and unconfirmed spends are overlaid on `/v1/utxo/{txid}/{vout}`. Disable with `MEMPOOL_ENABLED=false` to keep the chain-only behaviour |
 | `TX_HISTORY_ENABLED` | `true` | Persist confirmed watched-transaction records during scanning so clients can reconstruct wallet history via `GET /v1/transactions`. Advertised as `tx_history_enabled` in `/v1/status`. Disable with `TX_HISTORY_ENABLED=false` |
+| `AUTO_RECOVER_HEADER_CACHE` | `true` | Detect an inconsistent Neutrino header index/flat-file cache at startup, preserve the rebuildable cache in a timestamped recovery directory, and resync public chain data from genesis. TLS, auth, watched addresses, UTXOs, and transaction history are preserved |
 | `MAX_PEERS` | `8` | Maximum number of peers to connect to |
 | `NO_AUTH` | `false` | Disable TLS and token authentication (for development/regtest) |
 
@@ -131,6 +132,7 @@ Anyone can reproduce and verify a release locally with one command:
   --cfilter-cdn-auto=true \
   --maxpeers=8 \
   --mempool=true \
+  --auto-recover-header-cache=true \
   --no-auth        # Disable TLS + auth (dev/regtest only)
   # --reset-auth   # Regenerate TLS cert and auth token, then exit
 ```
@@ -661,6 +663,7 @@ sudo systemctl enable --now neutrinod
 - Run as non-root user (already configured in Dockerfile)
 - Monitor resource usage and set appropriate limits
 - Keep data directory backed up
+- After a recovered header-cache resync succeeds, remove old `header-cache-recovery-*` directories to reclaim space.
 - Use firewall rules to restrict access
 
 ## Architecture

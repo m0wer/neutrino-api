@@ -48,6 +48,7 @@ func main() {
 	autoSyncIntervalSec := flag.Int("auto-sync-interval", getEnvInt("AUTO_SYNC_INTERVAL_SEC", 30), "Seconds between auto-sync polling passes for new blocks (only used when --auto-sync-watched is enabled)")
 	mempoolEnabled := flag.Bool("mempool", getEnvBool("MEMPOOL_ENABLED", true), "Enable watched-only mempool tracking: relay tx invs from peers and track unconfirmed transactions matching watched addresses")
 	txHistoryEnabled := flag.Bool("tx-history", getEnvBool("TX_HISTORY_ENABLED", true), "Persist confirmed watched-transaction records during scanning so clients can reconstruct wallet history via GET /v1/transactions")
+	autoRecoverHeaderCache := flag.Bool("auto-recover-header-cache", getEnvBool("AUTO_RECOVER_HEADER_CACHE", true), "Quarantine and rebuild the public Neutrino chain cache when startup detects inconsistent header storage")
 	noAuth := flag.Bool("no-auth", getEnvBool("NO_AUTH", false), "Disable TLS and token authentication (for development/regtest)")
 	resetAuth := flag.Bool("reset-auth", false, "Regenerate TLS cert and auth token, clear watched addresses, then exit")
 	showVersion := flag.Bool("version", false, "Show version and exit")
@@ -117,26 +118,27 @@ func main() {
 
 	// Create neutrino node
 	nodeConfig := &neutrino.Config{
-		Network:             *network,
-		DataDir:             *dataDir,
-		TorProxy:            *torProxy,
-		AddPeers:            *addPeers,
-		Version:             version,
-		MaxPeers:            8,
-		FilterCacheSize:     100 * 1024 * 1024,
-		PrefetchFilters:     *prefetchFilters,
-		PrefetchWorkers:     *prefetchWorkers,
-		PrefetchStart:       int32(*prefetchStart),
-		PrefetchLookback:    int32(*prefetchLookback),
-		ClearnetInitialSync: *clearnetInitialSync,
-		CFilterCDNAuto:      *cfilterCDNAuto,
-		CFilterCDNURL:       *cfilterCDNURL,
-		AutoSyncWatched:     *autoSyncWatched,
-		AutoSyncInterval:    time.Duration(*autoSyncIntervalSec) * time.Second,
-		MempoolEnabled:      *mempoolEnabled,
-		TxHistoryEnabled:    *txHistoryEnabled,
-		Logger:              backend,
-		LogLevel:            *logLevel,
+		Network:                *network,
+		DataDir:                *dataDir,
+		TorProxy:               *torProxy,
+		AddPeers:               *addPeers,
+		Version:                version,
+		MaxPeers:               8,
+		FilterCacheSize:        100 * 1024 * 1024,
+		PrefetchFilters:        *prefetchFilters,
+		PrefetchWorkers:        *prefetchWorkers,
+		PrefetchStart:          int32(*prefetchStart),
+		PrefetchLookback:       int32(*prefetchLookback),
+		ClearnetInitialSync:    *clearnetInitialSync,
+		CFilterCDNAuto:         *cfilterCDNAuto,
+		CFilterCDNURL:          *cfilterCDNURL,
+		AutoSyncWatched:        *autoSyncWatched,
+		AutoSyncInterval:       time.Duration(*autoSyncIntervalSec) * time.Second,
+		MempoolEnabled:         *mempoolEnabled,
+		TxHistoryEnabled:       *txHistoryEnabled,
+		AutoRecoverHeaderCache: *autoRecoverHeaderCache,
+		Logger:                 backend,
+		LogLevel:               *logLevel,
 	}
 
 	node, err := neutrino.NewNode(nodeConfig)
