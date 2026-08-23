@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 )
 
@@ -29,11 +29,11 @@ func newTestRescanMgr(t *testing.T, watchedAddr string, confirmed map[string]UTX
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       newTrackerLogger(),
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 	if watchedAddr != "" {
-		addr, err := btcutil.DecodeAddress(watchedAddr, &chaincfg.MainNetParams)
+		addr, err := address.DecodeAddress(watchedAddr, &chaincfg.MainNetParams)
 		if err != nil {
 			t.Fatalf("decode watched addr: %v", err)
 		}
@@ -66,7 +66,7 @@ func newTracker(rescanMgr *RescanManager) *MempoolTracker {
 // pkScriptFor returns the standard pkScript for a mainnet address.
 func pkScriptFor(t *testing.T, addrStr string) []byte {
 	t.Helper()
-	addr, err := btcutil.DecodeAddress(addrStr, &chaincfg.MainNetParams)
+	addr, err := address.DecodeAddress(addrStr, &chaincfg.MainNetParams)
 	if err != nil {
 		t.Fatalf("decode addr: %v", err)
 	}

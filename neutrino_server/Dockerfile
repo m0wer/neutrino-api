@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.27.0-alpine3.23 AS builder
 
 ARG VERSION=dev
 
@@ -18,8 +18,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -o neutrinod ./cmd/neutrinod
 
 # Runtime stage
-FROM alpine:3.19
-
+FROM alpine:3.23.5
 RUN apk add --no-cache ca-certificates tzdata
 
 # Create non-root user

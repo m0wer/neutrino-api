@@ -29,7 +29,7 @@ repos:
         pass_filenames: false
       - id: go-staticcheck
         name: go staticcheck
-        entry: bash -c 'cd neutrino_server && go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...'
+        entry: bash -c 'cd neutrino_server && go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...'
         language: system
         files: \.go$
         pass_filenames: false

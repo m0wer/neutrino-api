@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `scripts/update-dependencies.sh` to synchronize reviewed Go, Docker,
   GitHub Actions, and tooling dependency pins before releases.
 
+### Changed
+
+- Migrate to Neutrino v0.18.0 and btcd v0.26.2, including the new v2 modules
+  for addresses, utilities, chain parameters, hashes, scripts, and wire types.
+- Update the build and CI toolchain to Go 1.27.0, Alpine 3.23.5, Staticcheck
+  2026.2.1, and the latest compatible GitHub Actions. Pin the regtest Bitcoin
+  Core image by digest for reproducible integration tests.
+
 ## [1.6.0] - 2026-08-23
 
 ### Added

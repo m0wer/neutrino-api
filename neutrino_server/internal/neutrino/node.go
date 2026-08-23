@@ -20,13 +20,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	btcaddress "github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/connmgr"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb" // Import bbolt driver
@@ -851,7 +851,7 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 	}
 
 	// Parse the address to get the pkScript
-	addr, err := btcutil.DecodeAddress(address, n.chainParams)
+	addr, err := btcaddress.DecodeAddress(address, n.chainParams)
 	if err != nil {
 		return nil, NewBadRequestError(fmt.Sprintf("invalid address %s: %v", address, err))
 	}

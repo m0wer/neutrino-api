@@ -14,12 +14,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/gcs/builder"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
@@ -33,7 +34,7 @@ type RescanManager struct {
 	store        *StateStore // nil means no persistence (e.g. in tests)
 
 	mu           sync.RWMutex
-	watchedAddrs map[string]btcutil.Address
+	watchedAddrs map[string]address.Address
 	utxoSet      map[string]UTXO // key: "txid:vout"
 
 	// rescanInProgress tracks the number of active rescans (atomic).
@@ -115,7 +116,7 @@ func NewRescanManager(cs *neutrino.ChainService, logger btclog.Logger, store *St
 		chainParams:  &chainParams,
 		logger:       logger,
 		store:        store,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -136,7 +137,7 @@ func (r *RescanManager) loadPersistedState() {
 	} else if len(addrs) > 0 {
 		loaded := 0
 		for _, addrStr := range addrs {
-			addr, err := btcutil.DecodeAddress(addrStr, r.chainParams)
+			addr, err := address.DecodeAddress(addrStr, r.chainParams)
 			if err != nil {
 				r.logger.Warnf("Skipping invalid persisted address %s: %v", addrStr, err)
 				continue
@@ -415,7 +416,7 @@ func (r *RescanManager) WatchAddress(addrStr string) error {
 		return nil // Already watching
 	}
 
-	addr, err := btcutil.DecodeAddress(addrStr, r.chainParams)
+	addr, err := address.DecodeAddress(addrStr, r.chainParams)
 	if err != nil {
 		return fmt.Errorf("invalid address %s: %w", addrStr, err)
 	}
@@ -498,7 +499,7 @@ var ErrRescanBusy = errors.New("a rescan is already in progress")
 // rescanJob describes a validated and admitted rescan operation.
 type rescanJob struct {
 	startHeight    int32
-	addrs          []btcutil.Address
+	addrs          []address.Address
 	updateCoverage bool
 	force          bool
 }
@@ -556,8 +557,8 @@ func (r *RescanManager) beginRescan(startHeight int32, addresses []string, force
 	}
 	releaseSlot := func() { r.releaseRescanSlot() }
 
-	// Add addresses to watch list and collect btcutil.Address objects.
-	addrs := make([]btcutil.Address, 0, len(addresses))
+	// Add addresses to watch list and collect address.Address objects.
+	addrs := make([]address.Address, 0, len(addresses))
 	for _, addrStr := range addresses {
 		if err := r.WatchAddress(addrStr); err != nil {
 			releaseSlot()
@@ -765,7 +766,7 @@ func (r *RescanManager) persistState() {
 // matched block, not only the ones that paid/spent a watched script. This
 // is safe because consumers (MempoolTracker.EvictConfirmed) only act on
 // txids they already track and silently ignore the rest.
-func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []btcutil.Address) ([]string, error) {
+func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address.Address) ([]string, error) {
 	totalBlocks := endHeight - startHeight + 1
 	r.logger.Infof("Scanning blocks %d to %d (%d blocks) for %d addresses",
 		startHeight, endHeight, totalBlocks, len(addrs))
@@ -1106,7 +1107,7 @@ func (r *RescanManager) verifyUTXOsUnspent(
 		}
 
 		// Build the pkScript for this UTXO's address.
-		addr, err := btcutil.DecodeAddress(utxo.Address, r.chainParams)
+		addr, err := address.DecodeAddress(utxo.Address, r.chainParams)
 		if err != nil {
 			r.logger.Debugf("Spend verify: skip %s, bad address %s: %v",
 				utxoKey, utxo.Address, err)

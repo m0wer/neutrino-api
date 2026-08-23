@@ -9,7 +9,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 GO_VERSION="1.27.0"
 ALPINE_VERSION="3.23.5"
 NEUTRINO_VERSION="v0.18.0"
-NEUTRINO_FORK_VERSION="v0.0.0-20260731081950-cae7469a3a18"
+NEUTRINO_FORK_VERSION="v0.0.0-20260823175358-3ba12bde0bd0"
 BTCD_VERSION="v0.26.2"
 STATICCHECK_VERSION="v0.8.1"
 BITCOIND_IMAGE="kylemanna/bitcoind@sha256:86bbcaa99bf3bf3d5df7fd6d9217b3a41194db4c4e34385064f2cfc9fa7bdf91"
@@ -167,10 +167,18 @@ fi
 
 run_go() {
     if command -v docker >/dev/null 2>&1; then
+        local -a docker_user_args=()
+        local docker_security_options
+        docker_security_options="$(docker info --format '{{json .SecurityOptions}}')"
+        if [[ "$docker_security_options" != *rootless* ]]; then
+            docker_user_args=(--user "$(id -u):$(id -g)")
+        fi
+
         mkdir -p "$REPO_ROOT/tmp/dependency-cache/go-build" "$REPO_ROOT/tmp/dependency-cache/go-mod"
         chmod 0777 "$REPO_ROOT/tmp/dependency-cache/go-build" "$REPO_ROOT/tmp/dependency-cache/go-mod"
         docker run --rm \
-            --user "$(id -u):$(id -g)" \
+            "${docker_user_args[@]}" \
+            --security-opt label=disable \
             -e GOCACHE=/workspace/tmp/dependency-cache/go-build \
             -e GOMODCACHE=/workspace/tmp/dependency-cache/go-mod \
             -e GOPATH=/tmp/go \

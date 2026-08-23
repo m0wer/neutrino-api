@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btclog"
 )
 
@@ -42,7 +42,7 @@ func TestNewRescanManager(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -71,7 +71,7 @@ func TestWatchAddress(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -120,7 +120,7 @@ func TestWatchedAddressCount(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -154,7 +154,7 @@ func TestAddUTXO(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -202,7 +202,7 @@ func TestRemoveUTXO(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -233,7 +233,7 @@ func TestGetUTXOs(t *testing.T) {
 		chainService: nil,
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -310,7 +310,7 @@ func TestRescanNilChainService(t *testing.T) {
 		chainService: nil,
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -331,7 +331,7 @@ func TestGetRescanStatusDefaults(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -363,7 +363,7 @@ func TestWatchAddressPersistence(t *testing.T) {
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
 		store:        store,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -422,7 +422,7 @@ func TestLoadPersistedState(t *testing.T) {
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
 		store:        store2,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 	mgr.loadPersistedState()
@@ -489,7 +489,7 @@ func TestLoadPersistedStateInvalidAddress(t *testing.T) {
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
 		store:        store2,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 	mgr.loadPersistedState()
@@ -515,7 +515,7 @@ func TestRescanManagerCloseWithStore(t *testing.T) {
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
 		store:        store,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -532,7 +532,7 @@ func TestRescanManagerCloseWithoutStore(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       btclog.NewBackend(nil).Logger("TEST"),
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -551,7 +551,7 @@ func TestRescanFallsBackToWatchedAddrs(t *testing.T) {
 		chainService: nil,
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -564,7 +564,7 @@ func TestRescanFallsBackToWatchedAddrs(t *testing.T) {
 	// Test 2: With a watched address and empty explicit addresses, Rescan should
 	// fall back to using watched addresses and attempt the scan (which fails because
 	// chainService is nil — but the fallback happened).
-	addr, _ := btcutil.DecodeAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &chaincfg.MainNetParams)
+	addr, _ := address.DecodeAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &chaincfg.MainNetParams)
 	mgr.watchedAddrs["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"] = addr
 
 	err = mgr.Rescan(0, []string{})
@@ -586,7 +586,7 @@ func TestRescanIncrementalSkip(t *testing.T) {
 		chainService: nil,
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -595,7 +595,7 @@ func TestRescanIncrementalSkip(t *testing.T) {
 	mgr.status.LastStartHeight = 243542
 
 	// Add a watched address so we don't early-return from "no addresses".
-	addr, _ := btcutil.DecodeAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &chaincfg.MainNetParams)
+	addr, _ := address.DecodeAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &chaincfg.MainNetParams)
 	mgr.watchedAddrs["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"] = addr
 
 	// Rescan with start_height=243542 (same as persisted start).
@@ -621,10 +621,10 @@ func TestRescanBusyRejected(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
-	addr, _ := btcutil.DecodeAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &chaincfg.MainNetParams)
+	addr, _ := address.DecodeAddress("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", &chaincfg.MainNetParams)
 	mgr.watchedAddrs["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"] = addr
 
 	// Simulate a running scan holding the single rescan slot.
@@ -648,7 +648,7 @@ func TestRescanNilChainServiceReleasesSlot(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -671,7 +671,7 @@ func TestForcedSubsetScanPreservesCoverageFloor(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 	mgr.status.LastStartHeight = 500
@@ -744,7 +744,7 @@ func TestRescanBusyHasNoSideEffects(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 	mgr.rescanInProgress.Store(1)
@@ -846,7 +846,7 @@ func TestVerifyUTXOsUnspentEmptySnapshot(t *testing.T) {
 	mgr := &RescanManager{
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -872,7 +872,7 @@ func TestVerifyUTXOsUnspentSkipsOutOfRange(t *testing.T) {
 		// proving the UTXO was NOT checked.
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
@@ -966,7 +966,7 @@ func TestStartAutoSyncLifecycle(t *testing.T) {
 		// tick, so no chain interaction is attempted.
 		chainParams:  &chaincfg.MainNetParams,
 		logger:       logger,
-		watchedAddrs: make(map[string]btcutil.Address),
+		watchedAddrs: make(map[string]address.Address),
 		utxoSet:      make(map[string]UTXO),
 	}
 
