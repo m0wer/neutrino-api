@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-23
+
 ### Added
 
 - Detect database-index/flat-file inconsistencies in Neutrino's rebuildable
@@ -14,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coupled cache files in a timestamped recovery directory and resyncs public
   chain data from genesis while retaining credentials and wallet rescan state.
   Set `AUTO_RECOVER_HEADER_CACHE=false` to require manual recovery instead.
+
+### Fixed
+
+- Embed the release version in published Docker images so
+  `neutrinod --version` reports the image tag instead of `dev`.
 
 ## [1.5.0] - 2026-07-30
 
@@ -433,7 +440,8 @@ Existing deployments that relied on unauthenticated plain HTTP access will break
 - RESTful JSON API
 - Configurable via CLI flags or environment variables
 
-[Unreleased]: https://github.com/m0wer/neutrino-api/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/m0wer/neutrino-api/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/m0wer/neutrino-api/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/m0wer/neutrino-api/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/m0wer/neutrino-api/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/m0wer/neutrino-api/compare/v1.2.0...v1.3.0
