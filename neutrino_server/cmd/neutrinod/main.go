@@ -172,10 +172,11 @@ func main() {
 
 	// Create HTTP(S) server
 	server := &http.Server{
-		Addr:         *listen,
-		Handler:      router,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:        *listen,
+		Handler:     router,
+		ReadTimeout: 30 * time.Second,
+		// A canceled lookup stops after its current bounded peer query returns.
+		WriteTimeout: api.UTXOLookupTimeout + 35*time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

@@ -1,7 +1,9 @@
 package neutrino
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -9,9 +11,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btclog"
 	"golang.org/x/net/proxy"
 )
+
+type mockUTXOScanSource struct {
+	endHeight    int32
+	bestBlockErr error
+	getBlockHash func(int64) (*chainhash.Hash, error)
+	getCFilter   func(chainhash.Hash) (*gcs.Filter, error)
+	getBlock     func(chainhash.Hash) (*btcutil.Block, error)
+}
+
+func (s *mockUTXOScanSource) BestBlock() (int32, error) {
+	return s.endHeight, s.bestBlockErr
+}
+
+func (s *mockUTXOScanSource) GetBlockHash(height int64) (*chainhash.Hash, error) {
+	return s.getBlockHash(height)
+}
+
+func (s *mockUTXOScanSource) GetCFilter(blockHash chainhash.Hash) (*gcs.Filter, error) {
+	return s.getCFilter(blockHash)
+}
+
+func (s *mockUTXOScanSource) GetBlock(blockHash chainhash.Hash) (*btcutil.Block, error) {
+	return s.getBlock(blockHash)
+}
 
 func TestNewNode(t *testing.T) {
 	backend := btclog.NewBackend(os.Stdout)
@@ -332,6 +364,259 @@ func TestUTXOSpendReportJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetUTXOAbortsOnUnavailableScanData(t *testing.T) {
+	const (
+		address = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+		txid    = "0000000000000000000000000000000000000000000000000000000000000000"
+	)
+
+	blockHash := chainhash.Hash{1}
+	matchingFilter := newMatchingFilter(t, address, &blockHash)
+
+	tests := []struct {
+		name     string
+		resource string
+		source   *mockUTXOScanSource
+	}{
+		{
+			name:     "block hash",
+			resource: "block hash",
+			source: &mockUTXOScanSource{
+				endHeight: 1,
+				getBlockHash: func(int64) (*chainhash.Hash, error) {
+					return nil, errors.New("header store unavailable")
+				},
+				getCFilter: func(chainhash.Hash) (*gcs.Filter, error) {
+					return nil, errors.New("unexpected compact filter request")
+				},
+				getBlock: func(chainhash.Hash) (*btcutil.Block, error) {
+					return nil, errors.New("unexpected block request")
+				},
+			},
+		},
+		{
+			name:     "compact filter",
+			resource: "compact filter",
+			source: &mockUTXOScanSource{
+				endHeight: 1,
+				getBlockHash: func(int64) (*chainhash.Hash, error) {
+					return &blockHash, nil
+				},
+				getCFilter: func(chainhash.Hash) (*gcs.Filter, error) {
+					return nil, errors.New("peer did not provide filter")
+				},
+				getBlock: func(chainhash.Hash) (*btcutil.Block, error) {
+					return nil, errors.New("unexpected block request")
+				},
+			},
+		},
+		{
+			name:     "block",
+			resource: "block",
+			source: &mockUTXOScanSource{
+				endHeight: 1,
+				getBlockHash: func(int64) (*chainhash.Hash, error) {
+					return &blockHash, nil
+				},
+				getCFilter: func(chainhash.Hash) (*gcs.Filter, error) {
+					return matchingFilter, nil
+				},
+				getBlock: func(chainhash.Hash) (*btcutil.Block, error) {
+					return nil, errors.New("peer did not provide block")
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &Node{chainParams: &chaincfg.MainNetParams, logger: btclog.Disabled}
+			report, err := node.getUTXOWithSource(context.Background(), txid, 0, address, 1, tt.source)
+			if report != nil {
+				t.Fatalf("unexpected UTXO report after unavailable %s", tt.resource)
+			}
+
+			var unavailableErr *UnavailableError
+			if !errors.As(err, &unavailableErr) {
+				t.Fatalf("expected UnavailableError, got %v", err)
+			}
+			if unavailableErr.Resource != tt.resource {
+				t.Errorf("unavailable resource = %q, want %q", unavailableErr.Resource, tt.resource)
+			}
+		})
+	}
+}
+
+func TestGetUTXOCancellationStopsScan(t *testing.T) {
+	const address = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+
+	blockHash := chainhash.Hash{1}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	source := &mockUTXOScanSource{
+		endHeight: 1,
+		getBlockHash: func(int64) (*chainhash.Hash, error) {
+			return &blockHash, nil
+		},
+		getCFilter: func(chainhash.Hash) (*gcs.Filter, error) {
+			close(started)
+			<-release
+			return nil, errors.New("peer query ended")
+		},
+		getBlock: func(chainhash.Hash) (*btcutil.Block, error) {
+			return nil, errors.New("unexpected block request")
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := (&Node{chainParams: &chaincfg.MainNetParams, logger: btclog.Disabled}).getUTXOWithSource(
+			ctx,
+			"0000000000000000000000000000000000000000000000000000000000000000",
+			0,
+			address,
+			1,
+			source,
+		)
+		result <- err
+	}()
+
+	<-started
+	cancel()
+
+	select {
+	case err := <-result:
+		t.Fatalf("scan returned before the in-flight query completed: %v", err)
+	default:
+	}
+
+	close(release)
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context cancellation, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("UTXO scan did not stop after the in-flight query completed")
+	}
+}
+
+func TestGetUTXOUsesOnlyCurrentRescannedState(t *testing.T) {
+	const (
+		address = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+		txid    = "0000000000000000000000000000000000000000000000000000000000000000"
+	)
+
+	newNode := func(scannedTip int32) *Node {
+		return &Node{
+			chainParams: &chaincfg.MainNetParams,
+			logger:      btclog.Disabled,
+			rescanMgr: &RescanManager{
+				utxoSet: map[string]UTXO{
+					fmt.Sprintf("%s:%d", txid, 0): {
+						TxID:         txid,
+						Vout:         0,
+						Value:        100_000,
+						Address:      address,
+						ScriptPubKey: "76a914000000000000000000000000000000000000000088ac",
+						Height:       90,
+					},
+				},
+				status: RescanStatus{LastScannedTip: scannedTip},
+			},
+		}
+	}
+
+	t.Run("current state returns without historical scan", func(t *testing.T) {
+		source := &mockUTXOScanSource{
+			endHeight: 100,
+			getBlockHash: func(int64) (*chainhash.Hash, error) {
+				t.Fatal("current cached UTXO unexpectedly started historical scan")
+				return nil, nil
+			},
+		}
+		report, err := newNode(100).getUTXOWithSource(
+			context.Background(), txid, 0, address, 90, source,
+		)
+		if err != nil {
+			t.Fatalf("getUTXOWithSource() error = %v", err)
+		}
+		if !report.Unspent || report.Value != 100_000 || report.BlockHeight != 90 {
+			t.Fatalf("unexpected cached report: %+v", report)
+		}
+	})
+
+	t.Run("stale state falls through to historical scan", func(t *testing.T) {
+		source := &mockUTXOScanSource{
+			endHeight: 100,
+			getBlockHash: func(int64) (*chainhash.Hash, error) {
+				return nil, errors.New("historical scan started")
+			},
+			getCFilter: func(chainhash.Hash) (*gcs.Filter, error) {
+				return nil, errors.New("unexpected compact filter request")
+			},
+			getBlock: func(chainhash.Hash) (*btcutil.Block, error) {
+				return nil, errors.New("unexpected block request")
+			},
+		}
+		_, err := newNode(99).getUTXOWithSource(
+			context.Background(), txid, 0, address, 90, source,
+		)
+		var unavailableErr *UnavailableError
+		if !errors.As(err, &unavailableErr) || unavailableErr.Resource != "block hash" {
+			t.Fatalf("stale cache did not fall through to historical scan: %v", err)
+		}
+	})
+
+	t.Run("creation before start height falls through to historical scan", func(t *testing.T) {
+		source := &mockUTXOScanSource{
+			endHeight: 100,
+			getBlockHash: func(int64) (*chainhash.Hash, error) {
+				return nil, errors.New("historical scan started")
+			},
+			getCFilter: func(chainhash.Hash) (*gcs.Filter, error) {
+				return nil, errors.New("unexpected compact filter request")
+			},
+			getBlock: func(chainhash.Hash) (*btcutil.Block, error) {
+				return nil, errors.New("unexpected block request")
+			},
+		}
+		_, err := newNode(100).getUTXOWithSource(
+			context.Background(), txid, 0, address, 91, source,
+		)
+		var unavailableErr *UnavailableError
+		if !errors.As(err, &unavailableErr) || unavailableErr.Resource != "block hash" {
+			t.Fatalf("out-of-range cache did not fall through to historical scan: %v", err)
+		}
+	})
+}
+
+func newMatchingFilter(t *testing.T, address string, blockHash *chainhash.Hash) *gcs.Filter {
+	t.Helper()
+
+	addr, err := btcutil.DecodeAddress(address, &chaincfg.MainNetParams)
+	if err != nil {
+		t.Fatalf("DecodeAddress() error = %v", err)
+	}
+	pkScript, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("PayToAddrScript() error = %v", err)
+	}
+
+	filter, err := gcs.BuildGCSFilter(
+		builder.DefaultP,
+		builder.DefaultM,
+		builder.DeriveKey(blockHash),
+		[][]byte{pkScript},
+	)
+	if err != nil {
+		t.Fatalf("BuildGCSFilter() error = %v", err)
+	}
+	return filter
 }
 
 func TestNewNodeWithCFilterCDNConfig(t *testing.T) {

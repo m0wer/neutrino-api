@@ -2,11 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -19,7 +22,7 @@ import (
 // mockNode implements NodeInterface for testing
 type mockNode struct {
 	getUTXOs     func(addresses []string) ([]neutrino.UTXO, error)
-	getUTXO      func(txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
+	getUTXO      func(ctx context.Context, txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
 	mempoolUTXOs func(addresses []string) []neutrino.MempoolUTXO
 	mempoolSpend func(txid string, vout uint32) (neutrino.MempoolSpend, bool)
 	mempoolTx    func(txid string) (*wire.MsgTx, bool)
@@ -62,9 +65,9 @@ func (m *mockNode) GetUTXOs(addresses []string) ([]neutrino.UTXO, error) {
 	return []neutrino.UTXO{}, nil
 }
 
-func (m *mockNode) GetUTXO(txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error) {
+func (m *mockNode) GetUTXO(ctx context.Context, txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error) {
 	if m.getUTXO != nil {
-		return m.getUTXO(txid, vout, address, startHeight)
+		return m.getUTXO(ctx, txid, vout, address, startHeight)
 	}
 	// Mock response for a spent UTXO
 	if txid == "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16" && vout == 0 {
@@ -725,6 +728,91 @@ func TestHandleGetUTXO_MissingAddress(t *testing.T) {
 	}
 }
 
+func TestHandleGetUTXO_ContextAndErrorMappings(t *testing.T) {
+	var lookupCtx context.Context
+	handler := NewHandler(&mockNode{
+		getUTXO: func(ctx context.Context, _ string, _ uint32, _ string, _ int32) (*neutrino.UTXOSpendReport, error) {
+			lookupCtx = ctx
+			return &neutrino.UTXOSpendReport{Unspent: true}, nil
+		},
+	}, newTestLogger())
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxo/{txid}/{vout}", handler.handleGetUTXO).Methods("GET")
+	req := httptest.NewRequest("GET", "/v1/utxo/abcd1234/0?address=bc1qtest", nil)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if lookupCtx == nil {
+		t.Fatal("GetUTXO did not receive the request context")
+	}
+	if _, ok := lookupCtx.Deadline(); !ok {
+		t.Fatal("GetUTXO context has no lookup deadline")
+	}
+
+	tests := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{
+			name:   "unavailable",
+			err:    neutrino.NewUnavailableError("compact filter", 42, errors.New("peer timeout")),
+			status: http.StatusServiceUnavailable,
+		},
+		{
+			name:   "not found",
+			err:    neutrino.NewNotFoundError("UTXO", "UTXO not found"),
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "bad request",
+			err:    neutrino.NewBadRequestError("invalid address"),
+			status: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHandler(&mockNode{
+				getUTXO: func(context.Context, string, uint32, string, int32) (*neutrino.UTXOSpendReport, error) {
+					return nil, tt.err
+				},
+			}, newTestLogger())
+			r := mux.NewRouter()
+			r.HandleFunc("/v1/utxo/{txid}/{vout}", h.handleGetUTXO).Methods("GET")
+			recorder := httptest.NewRecorder()
+			r.ServeHTTP(recorder, httptest.NewRequest("GET", "/v1/utxo/abcd1234/0?address=bc1qtest", nil))
+
+			if recorder.Code != tt.status {
+				t.Errorf("status = %d, want %d", recorder.Code, tt.status)
+			}
+		})
+	}
+}
+
+func TestHandleGetUTXO_DeadlineExceeded(t *testing.T) {
+	handler := NewHandler(&mockNode{
+		getUTXO: func(ctx context.Context, _ string, _ uint32, _ string, _ int32) (*neutrino.UTXOSpendReport, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}, newTestLogger())
+	handler.utxoLookupTimeout = time.Millisecond
+
+	router := mux.NewRouter()
+	router.HandleFunc("/v1/utxo/{txid}/{vout}", handler.handleGetUTXO).Methods("GET")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, httptest.NewRequest("GET", "/v1/utxo/abcd1234/0?address=bc1qtest", nil))
+
+	if rr.Code != http.StatusGatewayTimeout {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusGatewayTimeout)
+	}
+}
+
 func TestHandleGetRescanStatus_NotInProgress(t *testing.T) {
 	backend := btclog.NewBackend(os.Stdout)
 	logger := backend.Logger("TEST")
@@ -979,7 +1067,7 @@ func TestHandleGetUTXOs_DedupConfirmedWinsOverMempool(t *testing.T) {
 // surfaced via mempool_* fields when the on-chain UTXO is still unspent.
 func TestHandleGetUTXO_MempoolSpendOverlay(t *testing.T) {
 	mock := &mockNode{
-		getUTXO: func(string, uint32, string, int32) (*neutrino.UTXOSpendReport, error) {
+		getUTXO: func(context.Context, string, uint32, string, int32) (*neutrino.UTXOSpendReport, error) {
 			return &neutrino.UTXOSpendReport{Unspent: true, Value: 5000, ScriptPubKey: "00"}, nil
 		},
 		mempoolSpend: func(txid string, vout uint32) (neutrino.MempoolSpend, bool) {
@@ -1013,7 +1101,7 @@ func TestHandleGetUTXO_MempoolSpendOverlay(t *testing.T) {
 func TestHandleGetUTXO_MempoolOptOut(t *testing.T) {
 	called := false
 	mock := &mockNode{
-		getUTXO: func(string, uint32, string, int32) (*neutrino.UTXOSpendReport, error) {
+		getUTXO: func(context.Context, string, uint32, string, int32) (*neutrino.UTXOSpendReport, error) {
 			return &neutrino.UTXOSpendReport{Unspent: true, Value: 5000}, nil
 		},
 		mempoolSpend: func(string, uint32) (neutrino.MempoolSpend, bool) {

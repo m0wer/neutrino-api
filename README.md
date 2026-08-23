@@ -421,6 +421,8 @@ any tracked mempool spend.
 - Specifying a `start_height` parameter is **highly recommended** for performance. Set it to the block height where the UTXO was created (or slightly before). Without it, the scan could take a very long time as it scans from the provided height to the current chain tip.
 - The `start_height` means "start scanning FROM this height going FORWARD to the chain tip", not backwards.
 - Performance scales with the scan range: scanning 1 block takes ~0.01s, scanning 100 blocks takes ~0.5s, scanning 10,000+ blocks can take minutes.
+- A single-UTXO lookup has a 25-second server deadline. It returns `503 Service Unavailable` when a required block hash, compact filter, or block cannot be retrieved, and `504 Gateway Timeout` when that lookup deadline expires. Both responses are retryable; an `unspent` response is returned only after every block through the captured chain tip has been checked.
+- UTXOs for watched wallet addresses return immediately from the persisted rescan state when its coverage reaches the current chain tip. Stale cached state is never used to answer an `unspent` query.
 
 ### Get Transaction (mempool only)
 

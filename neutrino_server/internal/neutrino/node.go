@@ -21,6 +21,8 @@ import (
 	"time"
 
 	btcaddress "github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -831,6 +833,39 @@ type UTXOSpendReport struct {
 	SpendingHeight uint32 `json:"spending_height,omitempty"`
 }
 
+// utxoScanSource is the chain data required by a single-UTXO lookup.
+// It is kept narrow to make the completeness guarantees of the scan testable.
+type utxoScanSource interface {
+	BestBlock() (int32, error)
+	GetBlockHash(height int64) (*chainhash.Hash, error)
+	GetCFilter(blockHash chainhash.Hash) (*gcs.Filter, error)
+	GetBlock(blockHash chainhash.Hash) (*btcutil.Block, error)
+}
+
+type chainServiceUTXOScanSource struct {
+	chainService *neutrino.ChainService
+}
+
+func (s chainServiceUTXOScanSource) BestBlock() (int32, error) {
+	bestBlock, err := s.chainService.BestBlock()
+	if err != nil {
+		return 0, err
+	}
+	return bestBlock.Height, nil
+}
+
+func (s chainServiceUTXOScanSource) GetBlockHash(height int64) (*chainhash.Hash, error) {
+	return s.chainService.GetBlockHash(height)
+}
+
+func (s chainServiceUTXOScanSource) GetCFilter(blockHash chainhash.Hash) (*gcs.Filter, error) {
+	return s.chainService.GetCFilter(blockHash, wire.GCSFilterRegular)
+}
+
+func (s chainServiceUTXOScanSource) GetBlock(blockHash chainhash.Hash) (*btcutil.Block, error) {
+	return s.chainService.GetBlock(blockHash)
+}
+
 // GetUTXO checks if a UTXO exists and whether it has been spent.
 // It scans from startHeight forward to the chain tip, looking for the UTXO creation
 // and any subsequent spend.
@@ -841,9 +876,23 @@ type UTXOSpendReport struct {
 //
 // startHeight should be set to the block height where the UTXO was created (or slightly before).
 // This is critical for performance - scanning from genesis is very slow.
-func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int32) (*UTXOSpendReport, error) {
+func (n *Node) GetUTXO(
+	ctx context.Context, txid string, vout uint32, address string, startHeight int32,
+) (*UTXOSpendReport, error) {
 	if n.chainService == nil {
 		return nil, errors.New("chain service not initialized")
+	}
+
+	return n.getUTXOWithSource(ctx, txid, vout, address, startHeight, chainServiceUTXOScanSource{
+		chainService: n.chainService,
+	})
+}
+
+func (n *Node) getUTXOWithSource(
+	ctx context.Context, txid string, vout uint32, address string, startHeight int32, source utxoScanSource,
+) (*UTXOSpendReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	if address == "" {
@@ -870,12 +919,17 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 	n.logger.Infof("Looking up UTXO %s:%d for address %s starting from height %d", txid, vout, address, startHeight)
 
 	// Get current best block
-	bestBlock, err := n.chainService.BestBlock()
+	endHeight, err := source.BestBlock()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get best block: %w", err)
+		return nil, NewUnavailableError("chain tip", -1, err)
+	}
+	if report, ok := n.lookupCurrentRescannedUTXO(
+		txid, vout, address, startHeight, endHeight,
+	); ok {
+		n.logger.Debugf("Using current rescanned UTXO state for %s:%d", txid, vout)
+		return report, nil
 	}
 
-	endHeight := bestBlock.Height
 	n.logger.Debugf("Scanning from height %d to %d", startHeight, endHeight)
 
 	// Scan blocks to find the transaction and any spend
@@ -886,30 +940,37 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 	var spendingHeight int32
 
 	for height := startHeight; height <= endHeight; height++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		// Get block hash
-		blockHash, err := n.chainService.GetBlockHash(int64(height))
+		blockHash, err := source.GetBlockHash(int64(height))
 		if err != nil {
-			n.logger.Debugf("Failed to get block hash for height %d: %v", height, err)
-			continue
+			return nil, NewUnavailableError("block hash", height, err)
+		}
+		if blockHash == nil {
+			return nil, NewUnavailableError("block hash", height, nil)
 		}
 
 		// Get compact block filter
-		filter, err := n.chainService.GetCFilter(*blockHash, wire.GCSFilterRegular)
+		filter, err := source.GetCFilter(*blockHash)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if err != nil {
-			n.logger.Debugf("Failed to get filter for block %d: %v", height, err)
-			continue
+			return nil, NewUnavailableError("compact filter", height, err)
 		}
 
 		if filter == nil {
-			continue
+			return nil, NewUnavailableError("compact filter", height, nil)
 		}
 
 		// Check if the filter matches our pkScript
 		key := builder.DeriveKey(blockHash)
 		matched, err := filter.Match(key, pkScript)
 		if err != nil {
-			n.logger.Debugf("Filter match error for block %d: %v", height, err)
-			continue
+			return nil, NewUnavailableError("compact filter", height, err)
 		}
 
 		if !matched {
@@ -919,10 +980,15 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 		n.logger.Debugf("Block %d filter matched, fetching full block", height)
 
 		// Filter matched - fetch the full block
-		block, err := n.chainService.GetBlock(*blockHash)
+		block, err := source.GetBlock(*blockHash)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if err != nil {
-			n.logger.Warnf("Failed to get block %d: %v", height, err)
-			continue
+			return nil, NewUnavailableError("block", height, err)
+		}
+		if block == nil {
+			return nil, NewUnavailableError("block", height, nil)
 		}
 
 		// Scan all transactions in the block
@@ -961,6 +1027,10 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Build response
 	if foundTx == nil {
 		return nil, NewNotFoundError("UTXO", "UTXO not found: ensure start_height is at or before the block containing the transaction")
@@ -985,6 +1055,34 @@ func (n *Node) GetUTXO(txid string, vout uint32, address string, startHeight int
 
 	n.logger.Infof("UTXO %s:%d found at height %d, unspent=%v", txid, vout, foundHeight, report.Unspent)
 	return report, nil
+}
+
+// lookupCurrentRescannedUTXO returns a watched UTXO only when the persisted
+// rescan state covers the current chain tip. This is the fast path for wallet
+// inputs; stale snapshots fall through to the complete historical scan.
+func (n *Node) lookupCurrentRescannedUTXO(
+	txid string, vout uint32, address string, startHeight, chainTip int32,
+) (*UTXOSpendReport, bool) {
+	if n.rescanMgr == nil {
+		return nil, false
+	}
+
+	status := n.rescanMgr.GetRescanStatus()
+	if status.InProgress || status.LastScannedTip < chainTip {
+		return nil, false
+	}
+
+	utxo, ok := n.rescanMgr.LookupConfirmedUTXO(txid, vout)
+	if !ok || utxo.Address != address || utxo.Height <= 0 || utxo.Height < startHeight {
+		return nil, false
+	}
+
+	return &UTXOSpendReport{
+		Unspent:      true,
+		Value:        utxo.Value,
+		ScriptPubKey: utxo.ScriptPubKey,
+		BlockHeight:  uint32(utxo.Height),
+	}, true
 }
 
 // monitorSync monitors the sync status and updates internal state.

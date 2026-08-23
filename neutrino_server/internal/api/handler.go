@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,10 @@ import (
 	"github.com/m0wer/neutrino-api/neutrino_server/internal/neutrino"
 )
 
+// UTXOLookupTimeout bounds the synchronous single-UTXO scan before the HTTP
+// server write timeout expires.
+const UTXOLookupTimeout = 25 * time.Second
+
 // NodeInterface defines the interface for neutrino node operations.
 type NodeInterface interface {
 	GetStatus() neutrino.Status
@@ -27,7 +32,7 @@ type NodeInterface interface {
 	GetBlockHash(height int32) (*chainhash.Hash, error)
 	BroadcastTransaction(tx *wire.MsgTx) error
 	GetUTXOs(addresses []string) ([]neutrino.UTXO, error)
-	GetUTXO(txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
+	GetUTXO(ctx context.Context, txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
 	WatchAddress(address string) error
 	StartRescan(startHeight int32, addresses []string, force bool) error
 	IsRescanInProgress() bool
@@ -46,9 +51,10 @@ type NodeInterface interface {
 
 // Handler provides REST API endpoints for the neutrino node.
 type Handler struct {
-	node    NodeInterface
-	logger  btclog.Logger
-	version string
+	node              NodeInterface
+	logger            btclog.Logger
+	version           string
+	utxoLookupTimeout time.Duration
 }
 
 // NewHandler creates a new API handler.
@@ -59,9 +65,10 @@ func NewHandler(node NodeInterface, logger btclog.Logger, version ...string) *Ha
 	}
 
 	return &Handler{
-		node:    node,
-		logger:  logger,
-		version: resolvedVersion,
+		node:              node,
+		logger:            logger,
+		version:           resolvedVersion,
+		utxoLookupTimeout: UTXOLookupTimeout,
 	}
 }
 
@@ -390,13 +397,21 @@ func (h *Handler) handleGetUTXO(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	report, err := h.node.GetUTXO(txid, uint32(vout), address, startHeight)
+	ctx, cancel := context.WithTimeout(r.Context(), h.utxoLookupTimeout)
+	defer cancel()
+
+	report, err := h.node.GetUTXO(ctx, txid, uint32(vout), address, startHeight)
 	if err != nil {
 		// Check for typed errors to return appropriate status codes
 		var notFoundErr *neutrino.NotFoundError
 		var badRequestErr *neutrino.BadRequestError
+		var unavailableErr *neutrino.UnavailableError
 
-		if errors.As(err, &notFoundErr) {
+		if errors.Is(err, context.DeadlineExceeded) {
+			h.errorResponse(w, http.StatusGatewayTimeout, "UTXO lookup timed out")
+		} else if errors.As(err, &unavailableErr) {
+			h.errorResponse(w, http.StatusServiceUnavailable, err.Error())
+		} else if errors.As(err, &notFoundErr) {
 			h.errorResponse(w, http.StatusNotFound, err.Error())
 		} else if errors.As(err, &badRequestErr) {
 			h.errorResponse(w, http.StatusBadRequest, err.Error())

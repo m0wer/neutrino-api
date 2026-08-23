@@ -2,6 +2,38 @@ package neutrino
 
 import "fmt"
 
+// UnavailableError represents temporarily unavailable chain data.
+// This should result in HTTP 503 responses so callers can retry.
+type UnavailableError struct {
+	Resource string
+	Height   int32
+	Err      error
+}
+
+func (e *UnavailableError) Error() string {
+	message := fmt.Sprintf("%s unavailable", e.Resource)
+	if e.Height >= 0 {
+		message = fmt.Sprintf("%s at height %d", message, e.Height)
+	}
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %v", message, e.Err)
+	}
+	return message
+}
+
+func (e *UnavailableError) Unwrap() error {
+	return e.Err
+}
+
+// NewUnavailableError creates a new UnavailableError.
+func NewUnavailableError(resource string, height int32, err error) *UnavailableError {
+	return &UnavailableError{
+		Resource: resource,
+		Height:   height,
+		Err:      err,
+	}
+}
+
 // NotFoundError represents an error when a requested resource is not found.
 // This should result in HTTP 404 responses.
 type NotFoundError struct {

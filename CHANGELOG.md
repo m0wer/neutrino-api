@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   2026.2.1, and the latest compatible GitHub Actions. Pin the regtest Bitcoin
   Core image by digest for reproducible integration tests.
 
+### Fixed
+
+- Make single-UTXO scans fail closed when required chain data is unavailable.
+  `GET /v1/utxo/{txid}/{vout}` now returns retryable `503 Service Unavailable`
+  for unavailable block data and `504 Gateway Timeout` after its 25-second
+  lookup deadline, rather than reporting an output as unspent after skipped
+  chain data. Current watched-wallet UTXOs use the persisted rescan state for
+  immediate lookup when its coverage reaches the chain tip.
+
 ## [1.6.0] - 2026-08-23
 
 ### Added
