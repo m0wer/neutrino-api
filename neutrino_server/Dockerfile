@@ -1,6 +1,8 @@
 # Build stage
 FROM golang:1.25-alpine AS builder
 
+ARG VERSION=dev
+
 WORKDIR /build
 
 # Copy go.mod and go.sum for dependency caching
@@ -11,7 +13,9 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o neutrinod ./cmd/neutrinod
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -o neutrinod ./cmd/neutrinod
 
 # Runtime stage
 FROM alpine:3.19
