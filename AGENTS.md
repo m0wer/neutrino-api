@@ -25,3 +25,21 @@
 # General Guidelines
 
 - After making changes, run all tests to ensure nothing is broken. Then run prek to format and lint the code. Finally, update CHANGELOG.md with a summary of your changes.
+
+## Release Preparation
+
+- Before every release, review the version constants at the top of
+  `scripts/update-dependencies.sh`, verify them against primary sources, and
+  run `./scripts/update-dependencies.sh`.
+- Review the complete dependency diff, resolve compatibility issues, and
+  update `CHANGELOG.md` before creating release artifacts.
+- Run `cd neutrino_server && go test -v -race -coverprofile=coverage.out ./...`,
+  `cd neutrino_server && go vet ./...`, the Docker build and integration tests,
+  and `prek run --all-files` before signing a release.
+- Build and sign the release digest with
+  `./scripts/release-build-sign.sh <version> --key 1C53A412D11EF3051704419C44912E1E03005B31`,
+  commit `signatures/<version>/`, and verify it with
+  `./scripts/verify-release-build.sh <version>`.
+- Create a signed release tag with
+  `git tag -s <version> -m "Release <version>"`. Do not push the commit or tag
+  unless the user explicitly requests it.
