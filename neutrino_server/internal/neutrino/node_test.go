@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	btcaddress "github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
@@ -598,7 +599,7 @@ func TestGetUTXOUsesOnlyCurrentRescannedState(t *testing.T) {
 func newMatchingFilter(t *testing.T, address string, blockHash *chainhash.Hash) *gcs.Filter {
 	t.Helper()
 
-	addr, err := btcutil.DecodeAddress(address, &chaincfg.MainNetParams)
+	addr, err := btcaddress.DecodeAddress(address, &chaincfg.MainNetParams)
 	if err != nil {
 		t.Fatalf("DecodeAddress() error = %v", err)
 	}

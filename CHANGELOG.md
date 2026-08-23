@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Install Git in the Docker builder so pseudo-version dependencies can fall
+  back to direct VCS resolution when unavailable from the Go module proxy.
 - Make single-UTXO scans fail closed when required chain data is unavailable.
   `GET /v1/utxo/{txid}/{vout}` now returns retryable `503 Service Unavailable`
   for unavailable block data and `504 Gateway Timeout` after its 25-second

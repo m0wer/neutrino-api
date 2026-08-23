@@ -5,6 +5,10 @@ ARG VERSION=dev
 
 WORKDIR /build
 
+# Pseudo-version dependencies may fall back to direct VCS resolution when the
+# Go module proxy has not indexed a newly published commit yet.
+RUN apk add --no-cache git
+
 # Copy go.mod and go.sum for dependency caching
 COPY go.mod go.sum ./
 RUN go mod download

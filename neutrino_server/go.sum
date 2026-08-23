@@ -64,8 +64,8 @@ github.com/lightningnetwork/lnd/queue v1.2.0 h1:sSrn+u84OLuOT/F+xGxgg8VfknXeIZEA
 github.com/lightningnetwork/lnd/queue v1.2.0/go.mod h1:qLNP0L3B7piRGvDyhAyJKic4xTt+Mw4D7mWrQeuAwxY=
 github.com/lightningnetwork/lnd/ticker v1.1.1 h1:J/b6N2hibFtC7JLV77ULQp++QLtCwT6ijJlbdiZFbSM=
 github.com/lightningnetwork/lnd/ticker v1.1.1/go.mod h1:waPTRAAcwtu7Ji3+3k+u/xH5GHovTsCoSVpho0KDvdA=
-github.com/m0wer/neutrino v0.0.0-20260823175358-3ba12bde0bd0 h1:YQpceNs0tT23yGn7xSiiwVnwno7p4F1nY+9lQ9iYxD8=
-github.com/m0wer/neutrino v0.0.0-20260823175358-3ba12bde0bd0/go.mod h1:TL52mV5nxeAN//WFHrU8XV9GZKwnrrNFL9/nKMX8sl4=
+github.com/m0wer/neutrino v0.0.0-20260823192754-eae1fa650415 h1:/tpx3m5GscRrBuMrrq2+8pQwsFpw25byqotVLtsMzSc=
+github.com/m0wer/neutrino v0.0.0-20260823192754-eae1fa650415/go.mod h1:TL52mV5nxeAN//WFHrU8XV9GZKwnrrNFL9/nKMX8sl4=
 github.com/stretchr/objx v0.5.3 h1:jmXUvGomnU1o3W/V5h2VEradbpJDwGrzugQQvL0POH4=
 github.com/stretchr/objx v0.5.3/go.mod h1:rDQraq+vQZU7Fde9LOZLr8Tax6zZvy4kuNKF+QYS+U0=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
