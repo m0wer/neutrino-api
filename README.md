@@ -108,7 +108,11 @@ Anyone can reproduce and verify a release locally with one command:
 | `ADD_PEERS` | | Comma-separated list of preferred peers (e.g., `node1:8333,node2:8333`) while still allowing peer discovery |
 | `TOR_PROXY` | | Tor SOCKS5 proxy address (e.g., `127.0.0.1:9050`) |
 | `CLEARNET_INITIAL_SYNC` | `true` | When `TOR_PROXY` is set, perform initial public header sync over clearnet before switching to Tor |
-| `CFILTER_CDN_AUTO` | `true` | Auto-download compact filters from block-dn CDN after P2P header sync (verified against filter headers) |
+| `PREFETCH_FILTERS` | `true` | Prefetch compact filter bodies in the background so historical scans do not block on peer downloads. Set to `false` to minimize storage when historical UTXO lookups are not needed |
+| `PREFETCH_WORKERS` | `0` | Number of background prefetch workers (`0` selects an automatic value) |
+| `PREFETCH_START` | `0` | First height to prefetch. `0` derives the start from `PREFETCH_LOOKBACK` |
+| `PREFETCH_LOOKBACK` | `105120` | Number of blocks to prefetch when `PREFETCH_START=0` (about two years) |
+| `CFILTER_CDN_AUTO` | `true` | Download prefetched compact filters from block-dn after P2P header sync (verified against filter headers) |
 | `CFILTER_CDN_URL` | | Override block-dn base URL for compact filter CDN downloads |
 | `AUTO_SYNC_WATCHED` | `true` | Continuously scan new blocks for watched addresses in the background, keeping the UTXO set up-to-date so `/v1/utxos` is instant. Reacts to block-connected notifications from the chain service in real time |
 | `AUTO_SYNC_INTERVAL_SEC` | `30` | Fallback poll interval (in seconds) used while waiting for initial header sync, and as a safety net if block-notification subscription is unavailable. Only used when `AUTO_SYNC_WATCHED=true` |
@@ -129,6 +133,8 @@ Anyone can reproduce and verify a release locally with one command:
   --addpeer=peer1:8333,peer2:8333 \
   --torproxy=127.0.0.1:9050 \
   --clearnet-initial-sync=true \
+  --prefetchfilters=true \
+  --prefetchlookback=105120 \
   --cfilter-cdn-auto=true \
   --maxpeers=8 \
   --mempool=true \
@@ -211,9 +217,11 @@ tor
   --cfilter-cdn-auto=true
 ```
 
-By default (`CFILTER_CDN_AUTO=true`), the server downloads compact filters
-from block-dn after P2P header sync completes. Filters are verified against
-P2P-synced filter headers before storage. Supported networks:
+By default (`PREFETCH_FILTERS=true`, `CFILTER_CDN_AUTO=true`), the server
+downloads the configured compact-filter lookback from block-dn after P2P
+header sync completes. Filters are verified against P2P-synced filter headers
+before storage. Set `PREFETCH_FILTERS=false` for deployments that do not need
+historical scans and prefer to minimize disk usage. Supported networks:
 
 - mainnet: `https://block-dn.org`
 - signet: `https://signet.block-dn.org`

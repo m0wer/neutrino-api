@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Enable bounded compact-filter prefetch by default so historical UTXO lookups
+  use locally persisted filters instead of timing out on peer-backed scans.
+  Set `PREFETCH_FILTERS=false` to retain the storage-minimizing behavior.
+
 ## [1.6.1] - 2026-08-23
 
 ### Added
