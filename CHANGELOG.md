@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use locally persisted filters instead of timing out on peer-backed scans.
   Set `PREFETCH_FILTERS=false` to retain the storage-minimizing behavior.
 
+### Fixed
+
+- Make reproducible release builds work with rootless Docker daemons by using
+  the daemon's mapped root user instead of an unprivileged subordinate UID.
+
 ## [1.6.1] - 2026-08-23
 
 ### Added

@@ -36,8 +36,13 @@ for cmd in git gpg sha256sum diff; do
 done
 
 USE_DOCKER=false
+DOCKER_USER_ARGS=()
 if command -v docker >/dev/null 2>&1; then
     USE_DOCKER=true
+    DOCKER_SECURITY_OPTIONS="$(docker info --format '{{json .SecurityOptions}}')"
+    if [[ "$DOCKER_SECURITY_OPTIONS" != *rootless* ]]; then
+        DOCKER_USER_ARGS=(--user "$(id -u):$(id -g)")
+    fi
 elif command -v go >/dev/null 2>&1; then
     GO_ACTUAL="$(go version | awk '{print $3}')"
     if [[ "$GO_ACTUAL" != "go${GO_VERSION}" ]]; then
@@ -98,7 +103,8 @@ for target in "${TARGETS[@]}"; do
 
     if [[ "$USE_DOCKER" == true ]]; then
         docker run --rm \
-            --user "$(id -u):$(id -g)" \
+            "${DOCKER_USER_ARGS[@]}" \
+            --security-opt label=disable \
             -e GOOS="$GOOS" \
             -e GOARCH="$GOARCH" \
             -e GOARM="$GOARM" \
