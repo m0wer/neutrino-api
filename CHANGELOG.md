@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `DELETE /v1/watch/addresses` for idempotent batch removal of watched
+  addresses and their persisted confirmed UTXOs. The operation preserves
+  rescan coverage metadata and confirmed transaction history.
+
 ## [1.7.1] - 2026-08-24
 
 ### Fixed

@@ -413,6 +413,61 @@ func TestNotifyMempoolConfirmed_EmptyTxidsIsNoOp(t *testing.T) {
 	}
 }
 
+func TestRemoveWatchedAddressesPrunesOnlyRelatedMempoolState(t *testing.T) {
+	removedAddress := watchedAddrMain
+	retainedAddress := "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+	confirmedTxID := "0000000000000000000000000000000000000000000000000000000000000003"
+	mgr := newTestRescanMgr(t, removedAddress, map[string]UTXO{
+		confirmedTxID + ":0": {
+			TxID: confirmedTxID, Vout: 0, Address: removedAddress, Height: 800000,
+		},
+	})
+	retained, err := address.DecodeAddress(retainedAddress, &chaincfg.MainNetParams)
+	if err != nil {
+		t.Fatalf("decode retained address: %v", err)
+	}
+	mgr.watchedAddrs[retainedAddress] = retained
+	tracker := newTracker(mgr)
+	mgr.SetMempoolTracker(tracker)
+
+	removedReceive := txWithOutput(pkScriptFor(t, removedAddress), 1000, nil)
+	retainedReceive := txWithOutput(pkScriptFor(t, retainedAddress), 2000, nil)
+	confirmedHash := mustHash(t, confirmedTxID)
+	retainedSpend := txWithOutput(
+		pkScriptFor(t, retainedAddress), 1500,
+		&wire.OutPoint{Hash: confirmedHash, Index: 0},
+	)
+	tracker.handleTx(removedReceive)
+	tracker.handleTx(retainedReceive)
+	tracker.handleTx(retainedSpend)
+
+	removal, err := mgr.RemoveWatchedAddresses([]string{removedAddress})
+	if err != nil {
+		t.Fatalf("RemoveWatchedAddresses(): %v", err)
+	}
+	if removal != (WatchAddressRemoval{RemovedAddresses: 1, RemovedUTXOs: 1}) {
+		t.Fatalf("unexpected removal: %+v", removal)
+	}
+	if got := tracker.MempoolUTXOsForAddresses([]string{removedAddress}); len(got) != 0 {
+		t.Fatalf("removed address mempool UTXOs remain: %v", got)
+	}
+	if _, ok := tracker.MempoolSpendOf(confirmedTxID, 0); ok {
+		t.Fatal("spend of removed confirmed UTXO remains")
+	}
+	if _, ok := tracker.MempoolTxByID(removedReceive.TxHash().String()); ok {
+		t.Fatal("entry only related to removed address remains")
+	}
+	if _, ok := tracker.MempoolTxByID(retainedReceive.TxHash().String()); !ok {
+		t.Fatal("unrelated receive entry was removed")
+	}
+	if _, ok := tracker.MempoolTxByID(retainedSpend.TxHash().String()); !ok {
+		t.Fatal("entry with a retained output was removed")
+	}
+	if stats := tracker.Stats(); stats.Entries != 2 || stats.UTXOs != 2 || stats.Spends != 0 {
+		t.Fatalf("unexpected retained mempool state: %+v", stats)
+	}
+}
+
 // fakePeer is a minimal query.Peer used to assert handleInv's getdata
 // routing. It records every QueueMessageWithEncoding invocation; the
 // channels and Addr exist only so the type satisfies the interface.

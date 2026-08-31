@@ -105,6 +105,60 @@ func (s *StateStore) LoadWatchedAddrs() ([]string, error) {
 	return addrs, nil
 }
 
+// RemoveWatchedAddresses atomically removes watched addresses and UTXOs that
+// belong to them. Rescan metadata and confirmed transaction history are left
+// untouched.
+func (s *StateStore) RemoveWatchedAddresses(addresses map[string]struct{}) (WatchAddressRemoval, error) {
+	if len(addresses) == 0 {
+		return WatchAddressRemoval{}, nil
+	}
+
+	var removal WatchAddressRemoval
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		watchedAddrs := tx.Bucket(bucketWatchedAddrs)
+		utxos := tx.Bucket(bucketUTXOSet)
+
+		for addr := range addresses {
+			if watchedAddrs.Get([]byte(addr)) == nil {
+				continue
+			}
+			if err := watchedAddrs.Delete([]byte(addr)); err != nil {
+				return fmt.Errorf("failed to remove watched address %s: %w", addr, err)
+			}
+			removal.RemovedAddresses++
+		}
+
+		var keysToDelete [][]byte
+		if err := utxos.ForEach(func(key, value []byte) error {
+			var utxo UTXO
+			if err := json.Unmarshal(value, &utxo); err != nil {
+				return fmt.Errorf("failed to unmarshal UTXO %s: %w", string(key), err)
+			}
+			if _, remove := addresses[utxo.Address]; !remove {
+				return nil
+			}
+			keyCopy := make([]byte, len(key))
+			copy(keyCopy, key)
+			keysToDelete = append(keysToDelete, keyCopy)
+			return nil
+		}); err != nil {
+			return err
+		}
+
+		for _, key := range keysToDelete {
+			if err := utxos.Delete(key); err != nil {
+				return fmt.Errorf("failed to remove UTXO %s: %w", string(key), err)
+			}
+			removal.RemovedUTXOs++
+		}
+		return nil
+	})
+	if err != nil {
+		return WatchAddressRemoval{}, fmt.Errorf("failed to remove watched addresses: %w", err)
+	}
+	return removal, nil
+}
+
 // --- UTXO Set ---
 
 // SaveUTXOSet persists the entire UTXO set atomically.

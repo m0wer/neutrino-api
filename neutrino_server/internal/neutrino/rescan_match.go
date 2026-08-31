@@ -49,6 +49,21 @@ func (r *RescanManager) LookupConfirmedUTXO(txid string, vout uint32) (UTXO, boo
 	return utxo, ok
 }
 
+// IsWatchedAddress reports whether an address is currently watched.
+func (r *RescanManager) IsWatchedAddress(addr string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.watchedAddrs[addr]
+	return ok
+}
+
+func (r *RescanManager) hasConfirmedUTXOKey(key string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.utxoSet[key]
+	return ok
+}
+
 // SetMempoolTracker registers a MempoolTracker so the auto-sync pass can
 // evict mempool entries that have just been confirmed. Passing nil disables
 // the eviction hook.

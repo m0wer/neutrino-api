@@ -776,6 +776,16 @@ func (n *Node) WatchAddress(address string) error {
 	return n.rescanMgr.WatchAddress(address)
 }
 
+// RemoveWatchedAddresses removes addresses from the watch list and deletes
+// their confirmed UTXOs.
+func (n *Node) RemoveWatchedAddresses(addresses []string) (WatchAddressRemoval, error) {
+	if n.rescanMgr == nil {
+		return WatchAddressRemoval{}, errors.New("rescan manager not initialized")
+	}
+
+	return n.rescanMgr.RemoveWatchedAddresses(addresses)
+}
+
 // Rescan triggers a rescan from the given height.
 func (n *Node) Rescan(startHeight int32, addresses []string) error {
 	if n.rescanMgr == nil {

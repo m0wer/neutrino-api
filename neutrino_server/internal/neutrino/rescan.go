@@ -412,27 +412,133 @@ func (r *RescanManager) WatchAddress(addrStr string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, exists := r.watchedAddrs[addrStr]; exists {
-		return nil // Already watching
-	}
-
 	addr, err := address.DecodeAddress(addrStr, r.chainParams)
 	if err != nil {
 		return fmt.Errorf("invalid address %s: %w", addrStr, err)
 	}
+	canonicalAddr := addr.String()
+	if _, exists := r.watchedAddrs[canonicalAddr]; exists {
+		return nil // Already watching
+	}
 
-	r.watchedAddrs[addrStr] = addr
-	r.logger.Debugf("Added watch address: %s", addrStr)
+	r.watchedAddrs[canonicalAddr] = addr
+	r.logger.Debugf("Added watch address: %s", canonicalAddr)
 
 	// Persist the new address.
 	if r.store != nil {
-		if err := r.store.SaveWatchedAddr(addrStr); err != nil {
-			r.logger.Warnf("Failed to persist watched address %s: %v", addrStr, err)
+		if err := r.store.SaveWatchedAddr(canonicalAddr); err != nil {
+			r.logger.Warnf("Failed to persist watched address %s: %v", canonicalAddr, err)
 			// Non-fatal: address is still in memory.
 		}
 	}
 
 	return nil
+}
+
+const (
+	// MaxWatchedAddressRemovalBatch bounds a single watched-address removal
+	// request while allowing wallet registration batches well beyond normal
+	// wallet gap limits.
+	MaxWatchedAddressRemovalBatch = 1000
+)
+
+var (
+	// ErrWatchedAddressRemovalEmpty is returned when no addresses were supplied
+	// for removal.
+	ErrWatchedAddressRemovalEmpty = errors.New("addresses must not be empty")
+	// ErrWatchedAddressRemovalTooLarge is returned when a removal request exceeds
+	// MaxWatchedAddressRemovalBatch input entries.
+	ErrWatchedAddressRemovalTooLarge = fmt.Errorf(
+		"addresses must contain at most %d entries", MaxWatchedAddressRemovalBatch,
+	)
+)
+
+// WatchAddressRemoval reports the state removed by a batch watch deletion.
+type WatchAddressRemoval struct {
+	RemovedAddresses int `json:"removed_addresses"`
+	RemovedUTXOs     int `json:"removed_utxos"`
+}
+
+// RemoveWatchedAddresses removes the supplied addresses and their confirmed
+// UTXOs. Every input is validated before the rescan slot or any state is
+// mutated, and the operation shares that slot with rescans to keep state
+// transitions serialized.
+func (r *RescanManager) RemoveWatchedAddresses(addresses []string) (WatchAddressRemoval, error) {
+	addressSet, err := r.validateWatchedAddressRemoval(addresses)
+	if err != nil {
+		return WatchAddressRemoval{}, err
+	}
+
+	if !r.rescanInProgress.CompareAndSwap(0, 1) {
+		return WatchAddressRemoval{}, ErrRescanBusy
+	}
+	defer r.releaseRescanSlot()
+
+	r.mu.Lock()
+	var persistedRemoval WatchAddressRemoval
+	if r.store != nil {
+		persistedRemoval, err = r.store.RemoveWatchedAddresses(addressSet)
+		if err != nil {
+			r.mu.Unlock()
+			return WatchAddressRemoval{}, err
+		}
+	}
+
+	memoryRemoval := WatchAddressRemoval{}
+	for addr := range addressSet {
+		if _, exists := r.watchedAddrs[addr]; exists {
+			delete(r.watchedAddrs, addr)
+			memoryRemoval.RemovedAddresses++
+		}
+	}
+
+	removedOutpoints := make([]string, 0)
+	for key, utxo := range r.utxoSet {
+		if _, remove := addressSet[utxo.Address]; !remove {
+			continue
+		}
+		delete(r.utxoSet, key)
+		removedOutpoints = append(removedOutpoints, key)
+		memoryRemoval.RemovedUTXOs++
+	}
+	mempool := r.mempool
+	r.mu.Unlock()
+
+	if mempool != nil {
+		mempool.RemoveWatchedAddresses(addressSet, removedOutpoints)
+	}
+
+	removal := memoryRemoval
+	if r.store != nil {
+		// The API describes durable cleanup. Persisted state is canonical when
+		// persistence is enabled, even if startup skipped a corrupt watch entry
+		// or an older process left memory and disk out of sync.
+		removal = persistedRemoval
+	}
+	r.logger.Infof("Removed %d watched addresses and %d UTXOs", removal.RemovedAddresses, removal.RemovedUTXOs)
+	return removal, nil
+}
+
+func (r *RescanManager) validateWatchedAddressRemoval(addresses []string) (map[string]struct{}, error) {
+	if len(addresses) == 0 {
+		return nil, ErrWatchedAddressRemovalEmpty
+	}
+	if len(addresses) > MaxWatchedAddressRemovalBatch {
+		return nil, ErrWatchedAddressRemovalTooLarge
+	}
+
+	addressSet := make(map[string]struct{}, len(addresses)*2)
+	for _, addrStr := range addresses {
+		decoded, err := address.DecodeAddress(addrStr, r.chainParams)
+		if err != nil {
+			return nil, fmt.Errorf("invalid address %s: %w", addrStr, err)
+		}
+		// Include both forms so deletion also cleans watches persisted by older
+		// versions before WatchAddress canonicalized Bech32 strings.
+		addressSet[addrStr] = struct{}{}
+		addressSet[decoded.String()] = struct{}{}
+	}
+	return addressSet, nil
 }
 
 // GetUTXOs returns UTXOs for the given addresses.
@@ -455,8 +561,11 @@ func (r *RescanManager) GetUTXOs(addresses []string) ([]UTXO, error) {
 
 	utxos := make([]UTXO, 0)
 	addrSet := make(map[string]bool)
-	for _, addr := range addresses {
-		addrSet[addr] = true
+	for _, addrStr := range addresses {
+		addrSet[addrStr] = true
+		if addr, err := address.DecodeAddress(addrStr, r.chainParams); err == nil {
+			addrSet[addr.String()] = true
+		}
 	}
 
 	for _, utxo := range r.utxoSet {
@@ -564,8 +673,13 @@ func (r *RescanManager) beginRescan(startHeight int32, addresses []string, force
 			releaseSlot()
 			return nil, err
 		}
+		decoded, err := address.DecodeAddress(addrStr, r.chainParams)
+		if err != nil {
+			releaseSlot()
+			return nil, err
+		}
 		r.mu.RLock()
-		addr := r.watchedAddrs[addrStr]
+		addr := r.watchedAddrs[decoded.String()]
 		r.mu.RUnlock()
 		addrs = append(addrs, addr)
 	}

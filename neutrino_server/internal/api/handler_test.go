@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,15 +22,16 @@ import (
 
 // mockNode implements NodeInterface for testing
 type mockNode struct {
-	getUTXOs     func(addresses []string) ([]neutrino.UTXO, error)
-	getUTXO      func(ctx context.Context, txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
-	mempoolUTXOs func(addresses []string) []neutrino.MempoolUTXO
-	mempoolSpend func(txid string, vout uint32) (neutrino.MempoolSpend, bool)
-	mempoolTx    func(txid string) (*wire.MsgTx, bool)
-	mempoolStats func() neutrino.MempoolStats
-	getStatus    func() neutrino.Status
-	txHistory    func(sinceHeight int32) (neutrino.TxHistoryResponse, error)
-	startRescan  func(startHeight int32, addresses []string, force bool) error
+	getUTXOs               func(addresses []string) ([]neutrino.UTXO, error)
+	getUTXO                func(ctx context.Context, txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
+	mempoolUTXOs           func(addresses []string) []neutrino.MempoolUTXO
+	mempoolSpend           func(txid string, vout uint32) (neutrino.MempoolSpend, bool)
+	mempoolTx              func(txid string) (*wire.MsgTx, bool)
+	mempoolStats           func() neutrino.MempoolStats
+	getStatus              func() neutrino.Status
+	txHistory              func(sinceHeight int32) (neutrino.TxHistoryResponse, error)
+	startRescan            func(startHeight int32, addresses []string, force bool) error
+	removeWatchedAddresses func(addresses []string) (neutrino.WatchAddressRemoval, error)
 }
 
 func (m *mockNode) GetStatus() neutrino.Status {
@@ -88,6 +90,13 @@ func (m *mockNode) GetUTXO(ctx context.Context, txid string, vout uint32, addres
 
 func (m *mockNode) WatchAddress(address string) error {
 	return nil
+}
+
+func (m *mockNode) RemoveWatchedAddresses(addresses []string) (neutrino.WatchAddressRemoval, error) {
+	if m.removeWatchedAddresses != nil {
+		return m.removeWatchedAddresses(addresses)
+	}
+	return neutrino.WatchAddressRemoval{}, nil
 }
 
 func (m *mockNode) StartRescan(startHeight int32, addresses []string, force bool) error {
@@ -591,6 +600,149 @@ func TestHandleWatchAddress_Success(t *testing.T) {
 	if response["status"] != "ok" {
 		t.Errorf("expected status 'ok', got %v", response["status"])
 	}
+}
+
+func TestHandleRemoveWatchedAddresses(t *testing.T) {
+	address := "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+
+	t.Run("success and route registration", func(t *testing.T) {
+		called := false
+		handler := NewHandler(&mockNode{
+			removeWatchedAddresses: func(addresses []string) (neutrino.WatchAddressRemoval, error) {
+				called = true
+				if len(addresses) != 2 || addresses[0] != address || addresses[1] != address {
+					t.Fatalf("unexpected addresses: %v", addresses)
+				}
+				return neutrino.WatchAddressRemoval{RemovedAddresses: 1, RemovedUTXOs: 2}, nil
+			},
+		}, newTestLogger())
+		router := mux.NewRouter()
+		handler.RegisterRoutes(router)
+
+		req := httptest.NewRequest(http.MethodDelete, "/v1/watch/addresses", bytes.NewBufferString(
+			`{"addresses":["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa","1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"]}`,
+		))
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", rr.Code)
+		}
+		if !called {
+			t.Fatal("expected removal to be dispatched")
+		}
+		var response struct {
+			Status           string `json:"status"`
+			RemovedAddresses int    `json:"removed_addresses"`
+			RemovedUTXOs     int    `json:"removed_utxos"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if response.Status != "ok" || response.RemovedAddresses != 1 || response.RemovedUTXOs != 2 {
+			t.Fatalf("unexpected response: %+v", response)
+		}
+	})
+
+	t.Run("rejects invalid requests before dispatch", func(t *testing.T) {
+		tests := []struct {
+			name string
+			body string
+		}{
+			{name: "malformed JSON", body: `{"addresses":`},
+			{name: "empty addresses", body: `{"addresses":[]}`},
+			{name: "trailing JSON", body: `{"addresses":["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"]} {}`},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				called := false
+				handler := NewHandler(&mockNode{
+					removeWatchedAddresses: func([]string) (neutrino.WatchAddressRemoval, error) {
+						called = true
+						return neutrino.WatchAddressRemoval{}, nil
+					},
+				}, newTestLogger())
+				router := mux.NewRouter()
+				router.HandleFunc("/v1/watch/addresses", handler.handleRemoveWatchedAddresses).Methods(http.MethodDelete)
+				rr := httptest.NewRecorder()
+				router.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/v1/watch/addresses", bytes.NewBufferString(test.body)))
+
+				if rr.Code != http.StatusBadRequest {
+					t.Fatalf("expected status 400, got %d", rr.Code)
+				}
+				if called {
+					t.Fatal("invalid request must not be dispatched")
+				}
+			})
+		}
+	})
+
+	t.Run("rejects oversized request before dispatch", func(t *testing.T) {
+		called := false
+		handler := NewHandler(&mockNode{
+			removeWatchedAddresses: func([]string) (neutrino.WatchAddressRemoval, error) {
+				called = true
+				return neutrino.WatchAddressRemoval{}, nil
+			},
+		}, newTestLogger())
+		body, err := json.Marshal(map[string]any{
+			"addresses": make([]string, neutrino.MaxWatchedAddressRemovalBatch+1),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		router := mux.NewRouter()
+		router.HandleFunc("/v1/watch/addresses", handler.handleRemoveWatchedAddresses).Methods(http.MethodDelete)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/v1/watch/addresses", bytes.NewReader(body)))
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d", rr.Code)
+		}
+		if called {
+			t.Fatal("oversized request must not be dispatched")
+		}
+	})
+
+	t.Run("rejects oversized request body before dispatch", func(t *testing.T) {
+		called := false
+		handler := NewHandler(&mockNode{
+			removeWatchedAddresses: func([]string) (neutrino.WatchAddressRemoval, error) {
+				called = true
+				return neutrino.WatchAddressRemoval{}, nil
+			},
+		}, newTestLogger())
+		router := mux.NewRouter()
+		router.HandleFunc("/v1/watch/addresses", handler.handleRemoveWatchedAddresses).Methods(http.MethodDelete)
+		body := `{"addresses":["` + strings.Repeat("a", WatchAddressRemovalBodyLimit) + `"]}`
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/v1/watch/addresses", strings.NewReader(body)))
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d", rr.Code)
+		}
+		if called {
+			t.Fatal("oversized request body must not be dispatched")
+		}
+	})
+
+	t.Run("busy", func(t *testing.T) {
+		handler := NewHandler(&mockNode{
+			removeWatchedAddresses: func([]string) (neutrino.WatchAddressRemoval, error) {
+				return neutrino.WatchAddressRemoval{}, neutrino.ErrRescanBusy
+			},
+		}, newTestLogger())
+		router := mux.NewRouter()
+		router.HandleFunc("/v1/watch/addresses", handler.handleRemoveWatchedAddresses).Methods(http.MethodDelete)
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/v1/watch/addresses", bytes.NewBufferString(
+			`{"addresses":["1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"]}`,
+		)))
+
+		if rr.Code != http.StatusConflict {
+			t.Fatalf("expected status 409, got %d", rr.Code)
+		}
+	})
 }
 
 func TestHandleGetUTXO_Success(t *testing.T) {

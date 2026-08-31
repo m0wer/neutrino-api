@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -25,6 +26,10 @@ import (
 // server write timeout expires.
 const UTXOLookupTimeout = 25 * time.Second
 
+// WatchAddressRemovalBodyLimit leaves room for 1,000 maximum-length Bitcoin
+// addresses plus JSON framing without allowing unbounded request allocation.
+const WatchAddressRemovalBodyLimit = 128 << 10
+
 // NodeInterface defines the interface for neutrino node operations.
 type NodeInterface interface {
 	GetStatus() neutrino.Status
@@ -34,6 +39,7 @@ type NodeInterface interface {
 	GetUTXOs(addresses []string) ([]neutrino.UTXO, error)
 	GetUTXO(ctx context.Context, txid string, vout uint32, address string, startHeight int32) (*neutrino.UTXOSpendReport, error)
 	WatchAddress(address string) error
+	RemoveWatchedAddresses(addresses []string) (neutrino.WatchAddressRemoval, error)
 	StartRescan(startHeight int32, addresses []string, force bool) error
 	IsRescanInProgress() bool
 	RescanStatus() neutrino.RescanStatus
@@ -96,6 +102,7 @@ func (h *Handler) RegisterRoutes(r *mux.Router) {
 
 	// Watch operations
 	r.HandleFunc("/v1/watch/address", h.handleWatchAddress).Methods("POST")
+	r.HandleFunc("/v1/watch/addresses", h.handleRemoveWatchedAddresses).Methods("DELETE")
 	r.HandleFunc("/v1/watch/outpoint", h.handleWatchOutpoint).Methods("POST")
 
 	// Rescan
@@ -468,6 +475,50 @@ func (h *Handler) handleWatchAddress(w http.ResponseWriter, r *http.Request) {
 
 	h.jsonResponse(w, map[string]string{
 		"status": "ok",
+	})
+}
+
+// Remove watched addresses endpoint.
+func (h *Handler) handleRemoveWatchedAddresses(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Addresses []string `json:"addresses"`
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, WatchAddressRemovalBodyLimit)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.Addresses) == 0 {
+		h.errorResponse(w, http.StatusBadRequest, neutrino.ErrWatchedAddressRemovalEmpty.Error())
+		return
+	}
+	if len(req.Addresses) > neutrino.MaxWatchedAddressRemovalBatch {
+		h.errorResponse(w, http.StatusBadRequest, neutrino.ErrWatchedAddressRemovalTooLarge.Error())
+		return
+	}
+
+	removal, err := h.node.RemoveWatchedAddresses(req.Addresses)
+	if err != nil {
+		if errors.Is(err, neutrino.ErrRescanBusy) {
+			h.errorResponse(w, http.StatusConflict, err.Error())
+			return
+		}
+		h.errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	h.jsonResponse(w, struct {
+		Status string `json:"status"`
+		neutrino.WatchAddressRemoval
+	}{
+		Status:              "ok",
+		WatchAddressRemoval: removal,
 	})
 }
 

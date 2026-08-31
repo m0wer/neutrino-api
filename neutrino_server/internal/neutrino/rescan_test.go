@@ -3,6 +3,7 @@ package neutrino
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,6 +144,43 @@ func TestWatchedAddressCount(t *testing.T) {
 
 	if got := mgr.WatchedAddressCount(); got != 1 {
 		t.Fatalf("expected watched count to remain 1, got %d", got)
+	}
+}
+
+func TestWatchAddressCanonicalizesBech32ForRemoval(t *testing.T) {
+	logger := btclog.NewBackend(os.Stdout).Logger("TEST")
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]address.Address),
+		utxoSet:      make(map[string]UTXO),
+	}
+	addr, err := address.NewAddressWitnessPubKeyHash(make([]byte, 20), &chaincfg.MainNetParams)
+	if err != nil {
+		t.Fatalf("NewAddressWitnessPubKeyHash(): %v", err)
+	}
+	lower := addr.String()
+	upper := strings.ToUpper(lower)
+
+	if err := mgr.WatchAddress(upper); err != nil {
+		t.Fatalf("WatchAddress(): %v", err)
+	}
+	if _, exists := mgr.watchedAddrs[lower]; !exists {
+		t.Fatalf("canonical watch key %s was not stored", lower)
+	}
+	if _, exists := mgr.watchedAddrs[upper]; exists {
+		t.Fatalf("noncanonical watch key %s was stored", upper)
+	}
+
+	removal, err := mgr.RemoveWatchedAddresses([]string{upper})
+	if err != nil {
+		t.Fatalf("RemoveWatchedAddresses(): %v", err)
+	}
+	if removal.RemovedAddresses != 1 {
+		t.Fatalf("expected one removed address, got %+v", removal)
+	}
+	if len(mgr.watchedAddrs) != 0 {
+		t.Fatalf("watched address remains after removal: %v", mgr.watchedAddrs)
 	}
 }
 
@@ -379,6 +417,165 @@ func TestWatchAddressPersistence(t *testing.T) {
 	}
 	if len(addrs) != 1 || addrs[0] != addr {
 		t.Errorf("expected [%s], got %v", addr, addrs)
+	}
+}
+
+func TestRemoveWatchedAddresses(t *testing.T) {
+	dir := t.TempDir()
+	logger := btclog.NewBackend(os.Stdout).Logger("TEST")
+	store, err := OpenStateStore(dir, logger)
+	if err != nil {
+		t.Fatalf("OpenStateStore(): %v", err)
+	}
+	defer store.Close()
+
+	removedAddress := "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+	retainedAddress := "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		store:        store,
+		watchedAddrs: make(map[string]address.Address),
+		utxoSet: map[string]UTXO{
+			"removed-1:0": {TxID: "removed-1", Vout: 0, Address: removedAddress},
+			"removed-2:1": {TxID: "removed-2", Vout: 1, Address: removedAddress},
+			"retained:0":  {TxID: "retained", Vout: 0, Address: retainedAddress},
+		},
+	}
+	for _, addr := range []string{removedAddress, retainedAddress} {
+		if err := mgr.WatchAddress(addr); err != nil {
+			t.Fatalf("WatchAddress(%s): %v", addr, err)
+		}
+	}
+	if err := store.SaveUTXOSet(mgr.utxoSet); err != nil {
+		t.Fatalf("SaveUTXOSet(): %v", err)
+	}
+	if err := store.SaveRescanMeta(200, 100); err != nil {
+		t.Fatalf("SaveRescanMeta(): %v", err)
+	}
+	if err := store.SaveTxHistory(TxHistoryRecord{TxID: "history", Height: 150, Confirmed: true}); err != nil {
+		t.Fatalf("SaveTxHistory(): %v", err)
+	}
+
+	removal, err := mgr.RemoveWatchedAddresses([]string{removedAddress, removedAddress})
+	if err != nil {
+		t.Fatalf("RemoveWatchedAddresses(): %v", err)
+	}
+	if removal != (WatchAddressRemoval{RemovedAddresses: 1, RemovedUTXOs: 2}) {
+		t.Fatalf("unexpected removal: %+v", removal)
+	}
+	if _, exists := mgr.watchedAddrs[removedAddress]; exists {
+		t.Fatal("removed address remains in memory")
+	}
+	if _, exists := mgr.utxoSet["removed-1:0"]; exists {
+		t.Fatal("removed UTXO remains in memory")
+	}
+	if _, exists := mgr.watchedAddrs[retainedAddress]; !exists {
+		t.Fatal("retained address was removed from memory")
+	}
+	if _, exists := mgr.utxoSet["retained:0"]; !exists {
+		t.Fatal("retained UTXO was removed from memory")
+	}
+
+	persistedAddrs, err := store.LoadWatchedAddrs()
+	if err != nil {
+		t.Fatalf("LoadWatchedAddrs(): %v", err)
+	}
+	if len(persistedAddrs) != 1 || persistedAddrs[0] != retainedAddress {
+		t.Fatalf("unexpected persisted addresses: %v", persistedAddrs)
+	}
+	persistedUTXOs, err := store.LoadUTXOSet()
+	if err != nil {
+		t.Fatalf("LoadUTXOSet(): %v", err)
+	}
+	if len(persistedUTXOs) != 1 {
+		t.Fatalf("unexpected persisted UTXOs: %v", persistedUTXOs)
+	}
+	tip, start, err := store.LoadRescanMeta()
+	if err != nil {
+		t.Fatalf("LoadRescanMeta(): %v", err)
+	}
+	if tip != 200 || start != 100 {
+		t.Fatalf("rescan metadata changed: tip=%d start=%d", tip, start)
+	}
+	history, err := store.LoadTxHistorySince(0)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince(): %v", err)
+	}
+	if len(history) != 1 || history[0].TxID != "history" {
+		t.Fatalf("transaction history changed: %v", history)
+	}
+
+	repeated, err := mgr.RemoveWatchedAddresses([]string{removedAddress})
+	if err != nil {
+		t.Fatalf("repeated RemoveWatchedAddresses(): %v", err)
+	}
+	if repeated != (WatchAddressRemoval{}) {
+		t.Fatalf("expected idempotent empty removal, got %+v", repeated)
+	}
+}
+
+func TestRemoveWatchedAddressesRejectsInvalidOrBusyRequests(t *testing.T) {
+	logger := btclog.NewBackend(os.Stdout).Logger("TEST")
+	watchedAddress := "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.MainNetParams,
+		logger:       logger,
+		watchedAddrs: make(map[string]address.Address),
+		utxoSet: map[string]UTXO{
+			"retained:0": {TxID: "retained", Vout: 0, Address: watchedAddress},
+		},
+	}
+	if err := mgr.WatchAddress(watchedAddress); err != nil {
+		t.Fatalf("WatchAddress(): %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		addresses []string
+		want      error
+	}{
+		{name: "empty", addresses: nil, want: ErrWatchedAddressRemovalEmpty},
+		{name: "invalid address", addresses: []string{watchedAddress, "invalid"}},
+		{
+			name:      "oversized",
+			addresses: make([]string, MaxWatchedAddressRemovalBatch+1),
+			want:      ErrWatchedAddressRemovalTooLarge,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.name == "oversized" {
+				for i := range test.addresses {
+					test.addresses[i] = watchedAddress
+				}
+			}
+			_, err := mgr.RemoveWatchedAddresses(test.addresses)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if test.want != nil && !errors.Is(err, test.want) {
+				t.Fatalf("expected %v, got %v", test.want, err)
+			}
+			if _, exists := mgr.watchedAddrs[watchedAddress]; !exists {
+				t.Fatal("invalid request removed watched address")
+			}
+			if _, exists := mgr.utxoSet["retained:0"]; !exists {
+				t.Fatal("invalid request removed UTXO")
+			}
+		})
+	}
+
+	mgr.rescanInProgress.Store(1)
+	_, err := mgr.RemoveWatchedAddresses([]string{watchedAddress})
+	if !errors.Is(err, ErrRescanBusy) {
+		t.Fatalf("expected ErrRescanBusy, got %v", err)
+	}
+	if _, exists := mgr.watchedAddrs[watchedAddress]; !exists {
+		t.Fatal("busy request removed watched address")
+	}
+	if _, exists := mgr.utxoSet["retained:0"]; !exists {
+		t.Fatal("busy request removed UTXO")
 	}
 }
 

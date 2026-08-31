@@ -97,6 +97,80 @@ func TestStateStoreWatchedAddrs(t *testing.T) {
 	}
 }
 
+func TestStateStoreRemoveWatchedAddresses(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+
+	removedAddress := "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+	retainedAddress := "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2"
+	for _, addr := range []string{removedAddress, retainedAddress} {
+		if err := store.SaveWatchedAddr(addr); err != nil {
+			t.Fatalf("SaveWatchedAddr(%s): %v", addr, err)
+		}
+	}
+	if err := store.SaveUTXOSet(map[string]UTXO{
+		"removed-1:0": {TxID: "removed-1", Vout: 0, Address: removedAddress},
+		"removed-2:1": {TxID: "removed-2", Vout: 1, Address: removedAddress},
+		"retained:0":  {TxID: "retained", Vout: 0, Address: retainedAddress},
+	}); err != nil {
+		t.Fatalf("SaveUTXOSet(): %v", err)
+	}
+	if err := store.SaveRescanMeta(200, 100); err != nil {
+		t.Fatalf("SaveRescanMeta(): %v", err)
+	}
+	if err := store.SaveTxHistory(TxHistoryRecord{TxID: "history", Height: 150, Confirmed: true}); err != nil {
+		t.Fatalf("SaveTxHistory(): %v", err)
+	}
+
+	removal, err := store.RemoveWatchedAddresses(map[string]struct{}{removedAddress: {}})
+	if err != nil {
+		t.Fatalf("RemoveWatchedAddresses(): %v", err)
+	}
+	if removal != (WatchAddressRemoval{RemovedAddresses: 1, RemovedUTXOs: 2}) {
+		t.Fatalf("unexpected removal: %+v", removal)
+	}
+
+	addrs, err := store.LoadWatchedAddrs()
+	if err != nil {
+		t.Fatalf("LoadWatchedAddrs(): %v", err)
+	}
+	if len(addrs) != 1 || addrs[0] != retainedAddress {
+		t.Fatalf("unexpected watched addresses: %v", addrs)
+	}
+	utxos, err := store.LoadUTXOSet()
+	if err != nil {
+		t.Fatalf("LoadUTXOSet(): %v", err)
+	}
+	if len(utxos) != 1 {
+		t.Fatalf("expected one retained UTXO, got %v", utxos)
+	}
+	if _, ok := utxos["retained:0"]; !ok {
+		t.Fatal("retained UTXO was removed")
+	}
+	tip, start, err := store.LoadRescanMeta()
+	if err != nil {
+		t.Fatalf("LoadRescanMeta(): %v", err)
+	}
+	if tip != 200 || start != 100 {
+		t.Fatalf("rescan metadata changed: tip=%d start=%d", tip, start)
+	}
+	history, err := store.LoadTxHistorySince(0)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince(): %v", err)
+	}
+	if len(history) != 1 || history[0].TxID != "history" {
+		t.Fatalf("transaction history changed: %v", history)
+	}
+
+	repeated, err := store.RemoveWatchedAddresses(map[string]struct{}{removedAddress: {}})
+	if err != nil {
+		t.Fatalf("repeated RemoveWatchedAddresses(): %v", err)
+	}
+	if repeated != (WatchAddressRemoval{}) {
+		t.Fatalf("expected idempotent empty removal, got %+v", repeated)
+	}
+}
+
 func TestStateStoreUTXOSet(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()

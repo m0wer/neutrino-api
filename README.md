@@ -315,6 +315,35 @@ curl -X POST http://localhost:8334/v1/watch/address \
   -d '{"address": "12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"}'
 ```
 
+### Remove Watched Addresses
+
+Remove watched addresses in one request, along with their persisted confirmed
+UTXOs:
+
+```bash
+curl -X DELETE http://localhost:8334/v1/watch/addresses \
+  -H "Content-Type: application/json" \
+  -d '{"addresses": ["12cbQLTFMXRnSzktFkuoG3eHoMeFtpTu3S"]}'
+```
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "removed_addresses": 1,
+  "removed_utxos": 2
+}
+```
+
+The request must contain between 1 and 1,000 address entries. Duplicate
+addresses are processed once. All addresses are validated before any state is
+changed, and a removal during an active rescan is rejected with HTTP `409`.
+Repeated removals succeed with zero counts. The operation preserves shared
+rescan coverage metadata and confirmed transaction history. It also removes
+matching watched mempool outputs and spends of the confirmed UTXOs removed by
+the request, without clearing unrelated mempool entries.
+
 ### Get UTXOs
 
 Query UTXOs for a list of addresses (requires prior rescan to populate UTXO set):

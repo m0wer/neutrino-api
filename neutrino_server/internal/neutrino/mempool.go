@@ -403,33 +403,56 @@ func (m *MempoolTracker) handleTx(tx *wire.MsgTx) {
 		return
 	}
 
+	// A removal can race an in-flight transaction match. Revalidate while
+	// holding the tracker lock so its cleanup cannot miss an entry created from
+	// a stale watched-address or confirmed-UTXO snapshot.
+	activeCreatedUTXOs := createdUTXOs[:0]
+	for _, utxo := range createdUTXOs {
+		if m.rescanMgr.IsWatchedAddress(utxo.Address) {
+			activeCreatedUTXOs = append(activeCreatedUTXOs, utxo)
+		}
+	}
+	activeSpentOutpoints := spentOutpoints[:0]
+	activeSpentKeys := spentKeys[:0]
+	for i, key := range spentKeys {
+		_, spendsMempoolUTXO := m.utxos[key]
+		if !m.rescanMgr.hasConfirmedUTXOKey(key) && !spendsMempoolUTXO {
+			continue
+		}
+		activeSpentOutpoints = append(activeSpentOutpoints, spentOutpoints[i])
+		activeSpentKeys = append(activeSpentKeys, key)
+	}
+	if len(activeCreatedUTXOs) == 0 && len(activeSpentOutpoints) == 0 {
+		return
+	}
+
 	entry := &mempoolEntry{
 		tx:             tx,
 		txid:           txid,
 		firstSeen:      time.Now(),
-		createdUTXOs:   make([]string, 0, len(createdUTXOs)),
-		spentOutpoints: spentKeys,
+		createdUTXOs:   make([]string, 0, len(activeCreatedUTXOs)),
+		spentOutpoints: activeSpentKeys,
 	}
 
-	for _, u := range createdUTXOs {
+	for _, u := range activeCreatedUTXOs {
 		key := fmt.Sprintf("%s:%d", u.TxID, u.Vout)
 		m.utxos[key] = u
 		entry.createdUTXOs = append(entry.createdUTXOs, key)
 	}
-	for i, sp := range spentOutpoints {
+	for i, sp := range activeSpentOutpoints {
 		// RBF: if a different tx already spends the same outpoint,
 		// drop the older entry first.
-		if existing, ok := m.spends[spentKeys[i]]; ok &&
+		if existing, ok := m.spends[activeSpentKeys[i]]; ok &&
 			existing.SpendingTxID != txid {
 			m.dropEntryLocked(existing.SpendingTxID, "rbf-replaced")
 		}
-		m.spends[spentKeys[i]] = sp
+		m.spends[activeSpentKeys[i]] = sp
 	}
 	m.entries[txid] = entry
 
 	m.logger.Infof(
 		"Mempool tracker: tracked tx %s (created=%d, spent=%d)",
-		txid, len(createdUTXOs), len(spentOutpoints),
+		txid, len(activeCreatedUTXOs), len(activeSpentOutpoints),
 	)
 }
 
@@ -479,6 +502,57 @@ func (m *MempoolTracker) EvictAll() {
 	m.entries = make(map[string]*mempoolEntry)
 	m.utxos = make(map[string]MempoolUTXO)
 	m.spends = make(map[string]MempoolSpend)
+}
+
+// RemoveWatchedAddresses drops mempool state attributable to removed watched
+// addresses while preserving entries that still concern other watched state.
+func (m *MempoolTracker) RemoveWatchedAddresses(addresses map[string]struct{}, confirmedOutpoints []string) {
+	if len(addresses) == 0 {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	removedOutpoints := make(map[string]struct{}, len(confirmedOutpoints))
+	for _, key := range confirmedOutpoints {
+		removedOutpoints[key] = struct{}{}
+	}
+	removedMempoolUTXOs := make(map[string]struct{})
+	for key, utxo := range m.utxos {
+		if _, remove := addresses[utxo.Address]; !remove {
+			continue
+		}
+		delete(m.utxos, key)
+		removedMempoolUTXOs[key] = struct{}{}
+		removedOutpoints[key] = struct{}{}
+	}
+
+	for txid, entry := range m.entries {
+		createdUTXOs := entry.createdUTXOs[:0]
+		for _, key := range entry.createdUTXOs {
+			if _, removed := removedMempoolUTXOs[key]; !removed {
+				createdUTXOs = append(createdUTXOs, key)
+			}
+		}
+		entry.createdUTXOs = createdUTXOs
+
+		spentOutpoints := entry.spentOutpoints[:0]
+		for _, key := range entry.spentOutpoints {
+			if _, removed := removedOutpoints[key]; !removed {
+				spentOutpoints = append(spentOutpoints, key)
+				continue
+			}
+			if spend, exists := m.spends[key]; exists && spend.SpendingTxID == txid {
+				delete(m.spends, key)
+			}
+		}
+		entry.spentOutpoints = spentOutpoints
+
+		if len(entry.createdUTXOs) == 0 && len(entry.spentOutpoints) == 0 {
+			delete(m.entries, txid)
+		}
+	}
 }
 
 func (m *MempoolTracker) evictionLoop() {
