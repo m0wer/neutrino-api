@@ -511,6 +511,7 @@ func TestGetUTXOUsesOnlyCurrentRescannedState(t *testing.T) {
 		address = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
 		txid    = "0000000000000000000000000000000000000000000000000000000000000000"
 	)
+	anchorHash := chainhash.Hash{1}
 
 	newNode := func(scannedTip int32) *Node {
 		return &Node{
@@ -519,12 +520,14 @@ func TestGetUTXOUsesOnlyCurrentRescannedState(t *testing.T) {
 			rescanMgr: &RescanManager{
 				utxoSet: map[string]UTXO{
 					fmt.Sprintf("%s:%d", txid, 0): {
-						TxID:         txid,
-						Vout:         0,
-						Value:        100_000,
-						Address:      address,
-						ScriptPubKey: "76a914000000000000000000000000000000000000000088ac",
-						Height:       90,
+						TxID:              txid,
+						Vout:              0,
+						Value:             100_000,
+						Address:           address,
+						ScriptPubKey:      "76a914000000000000000000000000000000000000000088ac",
+						Height:            90,
+						VerifiedTipHeight: scannedTip,
+						VerifiedTipHash:   anchorHash.String(),
 					},
 				},
 				status: RescanStatus{LastScannedTip: scannedTip},
@@ -535,9 +538,11 @@ func TestGetUTXOUsesOnlyCurrentRescannedState(t *testing.T) {
 	t.Run("current state returns without historical scan", func(t *testing.T) {
 		source := &mockUTXOScanSource{
 			endHeight: 100,
-			getBlockHash: func(int64) (*chainhash.Hash, error) {
-				t.Fatal("current cached UTXO unexpectedly started historical scan")
-				return nil, nil
+			getBlockHash: func(height int64) (*chainhash.Hash, error) {
+				if height != 100 {
+					t.Fatalf("current cached UTXO unexpectedly started historical scan at height %d", height)
+				}
+				return &anchorHash, nil
 			},
 		}
 		report, err := newNode(100).getUTXOWithSource(

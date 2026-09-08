@@ -7,6 +7,7 @@ BIP157/BIP158 compact block filters for privacy-preserving blockchain access.
 package neutrino
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -119,12 +120,14 @@ type Node struct {
 
 // UTXO represents an unspent transaction output.
 type UTXO struct {
-	TxID         string `json:"txid"`
-	Vout         uint32 `json:"vout"`
-	Value        int64  `json:"value"`
-	Address      string `json:"address"`
-	ScriptPubKey string `json:"scriptpubkey"`
-	Height       int32  `json:"height"`
+	TxID              string `json:"txid"`
+	Vout              uint32 `json:"vout"`
+	Value             int64  `json:"value"`
+	Address           string `json:"address"`
+	ScriptPubKey      string `json:"scriptpubkey"`
+	Height            int32  `json:"height"`
+	VerifiedTipHeight int32  `json:"verified_tip_height,omitempty"`
+	VerifiedTipHash   string `json:"verified_tip_hash,omitempty"`
 }
 
 // Transaction represents a blockchain transaction.
@@ -934,13 +937,19 @@ func (n *Node) getUTXOWithSource(
 		return nil, NewUnavailableError("chain tip", -1, err)
 	}
 	if report, ok := n.lookupCurrentRescannedUTXO(
-		txid, vout, address, startHeight, endHeight,
+		txid, vout, address, startHeight, endHeight, source,
 	); ok {
 		n.logger.Debugf("Using current rescanned UTXO state for %s:%d", txid, vout)
 		return report, nil
 	}
 
 	n.logger.Debugf("Scanning from height %d to %d", startHeight, endHeight)
+	tipHash, err := source.GetBlockHash(int64(endHeight))
+	if err != nil || tipHash == nil {
+		return nil, NewUnavailableError("block hash", endHeight, err)
+	}
+	scanSource := newConsistentScanSource(source, endHeight, *tipHash)
+	source = scanSource
 
 	// Scan blocks to find the transaction and any spend
 	var foundTx *wire.MsgTx
@@ -1009,6 +1018,9 @@ func (n *Node) getUTXOWithSource(
 			if foundTx == nil && txHash.IsEqual(targetHash) {
 				// Found the transaction creating the UTXO
 				if int(vout) < len(tx.MsgTx().TxOut) {
+					if !bytes.Equal(tx.MsgTx().TxOut[vout].PkScript, pkScript) {
+						return nil, NewBadRequestError("address does not match the requested output's script")
+					}
 					foundTx = tx.MsgTx()
 					foundHeight = height
 					n.logger.Infof("Found UTXO creation at height %d", height)
@@ -1041,7 +1053,14 @@ func (n *Node) getUTXOWithSource(
 		return nil, err
 	}
 
-	// Build response
+	if err := scanSource.validate(ctx); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, NewUnavailableError("chain validation", endHeight, err)
+	}
+
+	// Build response only after checking the chain, including negative results.
 	if foundTx == nil {
 		return nil, NewNotFoundError("UTXO", "UTXO not found: ensure start_height is at or before the block containing the transaction")
 	}
@@ -1067,23 +1086,30 @@ func (n *Node) getUTXOWithSource(
 	return report, nil
 }
 
-// lookupCurrentRescannedUTXO returns a watched UTXO only when the persisted
-// rescan state covers the current chain tip. This is the fast path for wallet
-// inputs; stale snapshots fall through to the complete historical scan.
+// lookupCurrentRescannedUTXO returns a watched UTXO only when that exact output
+// was verified through the current canonical tip. This is the fast path for
+// wallet inputs; incomplete or stale provenance falls through to the complete
+// historical scan.
 func (n *Node) lookupCurrentRescannedUTXO(
-	txid string, vout uint32, address string, startHeight, chainTip int32,
+	txid string, vout uint32, address string, startHeight, chainTip int32, source utxoScanSource,
 ) (*UTXOSpendReport, bool) {
 	if n.rescanMgr == nil {
 		return nil, false
 	}
 
-	status := n.rescanMgr.GetRescanStatus()
-	if status.InProgress || status.LastScannedTip < chainTip {
+	utxo, ok := n.rescanMgr.LookupConfirmedUTXO(txid, vout)
+	if !ok || utxo.TxID != txid || utxo.Vout != vout || utxo.Address != address ||
+		utxo.Height <= 0 || utxo.Height < startHeight || utxo.VerifiedTipHeight < utxo.Height ||
+		utxo.VerifiedTipHeight != chainTip || len(utxo.VerifiedTipHash) != chainhash.MaxHashStringSize {
 		return nil, false
 	}
 
-	utxo, ok := n.rescanMgr.LookupConfirmedUTXO(txid, vout)
-	if !ok || utxo.Address != address || utxo.Height <= 0 || utxo.Height < startHeight {
+	verifiedTipHash, err := chainhash.NewHashFromStr(utxo.VerifiedTipHash)
+	if err != nil {
+		return nil, false
+	}
+	canonicalTipHash, err := source.GetBlockHash(int64(chainTip))
+	if err != nil || canonicalTipHash == nil || !canonicalTipHash.IsEqual(verifiedTipHash) {
 		return nil, false
 	}
 

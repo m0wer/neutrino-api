@@ -2,13 +2,20 @@ package neutrino
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 )
 
@@ -1248,5 +1255,597 @@ func TestPreserveEarliestLastStartHeight(t *testing.T) {
 				t.Fatalf("LastStartHeight: got %d, want %d", updated, tc.expectedAfterUpdate)
 			}
 		})
+	}
+}
+
+const rescanTestAddress = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
+
+type fakeRescanSource struct {
+	endHeight    int32
+	bestBlockErr error
+	getBlockHash func(int64) (*chainhash.Hash, error)
+	getCFilter   func(chainhash.Hash) (*gcs.Filter, error)
+	getBlock     func(chainhash.Hash) (*btcutil.Block, error)
+}
+
+func (s *fakeRescanSource) BestBlock() (int32, error) {
+	return s.endHeight, s.bestBlockErr
+}
+
+func (s *fakeRescanSource) GetBlockHash(height int64) (*chainhash.Hash, error) {
+	return s.getBlockHash(height)
+}
+
+func (s *fakeRescanSource) GetCFilter(blockHash chainhash.Hash) (*gcs.Filter, error) {
+	return s.getCFilter(blockHash)
+}
+
+func (s *fakeRescanSource) GetBlock(blockHash chainhash.Hash) (*btcutil.Block, error) {
+	return s.getBlock(blockHash)
+}
+
+func newRescanTestManager(t *testing.T) (*RescanManager, *StateStore, address.Address) {
+	t.Helper()
+
+	store, err := OpenStateStore(t.TempDir(), newTrackerLogger())
+	if err != nil {
+		t.Fatalf("OpenStateStore() error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("StateStore.Close() error: %v", err)
+		}
+	})
+
+	addr, err := address.DecodeAddress(rescanTestAddress, &chaincfg.RegressionNetParams)
+	if err != nil {
+		t.Fatalf("DecodeAddress() error: %v", err)
+	}
+	mgr := &RescanManager{
+		chainParams:  &chaincfg.RegressionNetParams,
+		logger:       newTrackerLogger(),
+		store:        store,
+		watchedAddrs: map[string]address.Address{rescanTestAddress: addr},
+		utxoSet: map[string]UTXO{
+			"known:0": {TxID: "known", Vout: 0, Address: rescanTestAddress, Height: 7},
+		},
+		status: RescanStatus{
+			LastStartHeight: 1,
+			LastScannedTip:  5,
+			LastError:       "previous failure",
+		},
+	}
+	if err := store.SaveRescanMeta(5, 1); err != nil {
+		t.Fatalf("SaveRescanMeta() error: %v", err)
+	}
+	return mgr, store, addr
+}
+
+func newRescanTestHash(t *testing.T) *chainhash.Hash {
+	t.Helper()
+
+	hash, err := chainhash.NewHashFromStr(strings.Repeat("01", chainhash.HashSize))
+	if err != nil {
+		t.Fatalf("NewHashFromStr() error: %v", err)
+	}
+	return hash
+}
+
+func newRescanTestFilter(t *testing.T, blockHash *chainhash.Hash, elements [][]byte) *gcs.Filter {
+	t.Helper()
+
+	filter, err := gcs.BuildGCSFilter(
+		builder.DefaultP,
+		builder.DefaultM,
+		builder.DeriveKey(blockHash),
+		elements,
+	)
+	if err != nil {
+		t.Fatalf("BuildGCSFilter() error: %v", err)
+	}
+	return filter
+}
+
+func newRescanMatchingFilter(t *testing.T, blockHash *chainhash.Hash, addr address.Address) *gcs.Filter {
+	t.Helper()
+
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("PayToAddrScript() error: %v", err)
+	}
+	return newRescanTestFilter(t, blockHash, [][]byte{script})
+}
+
+func newRescanTestBlock(txs ...*wire.MsgTx) *btcutil.Block {
+	block := wire.NewMsgBlock(&wire.BlockHeader{})
+	for _, tx := range txs {
+		block.AddTransaction(tx)
+	}
+	return btcutil.NewBlock(block)
+}
+
+func newRescanTestSource(
+	blockHash *chainhash.Hash, filter *gcs.Filter, block *btcutil.Block,
+) *fakeRescanSource {
+	return &fakeRescanSource{
+		endHeight: 6,
+		getBlockHash: func(int64) (*chainhash.Hash, error) {
+			return blockHash, nil
+		},
+		getCFilter: func(chainhash.Hash) (*gcs.Filter, error) {
+			return filter, nil
+		},
+		getBlock: func(chainhash.Hash) (*btcutil.Block, error) {
+			return block, nil
+		},
+	}
+}
+
+func assertRescanCoverage(t *testing.T, mgr *RescanManager, store *StateStore, tip, start int32) {
+	t.Helper()
+
+	status := mgr.GetRescanStatus()
+	if status.LastScannedTip != tip || status.LastStartHeight != start {
+		t.Fatalf("in-memory coverage = (%d, %d), want (%d, %d)",
+			status.LastScannedTip, status.LastStartHeight, tip, start)
+	}
+	persistedTip, persistedStart, err := store.LoadRescanMeta()
+	if err != nil {
+		t.Fatalf("LoadRescanMeta() error: %v", err)
+	}
+	if persistedTip != tip || persistedStart != start {
+		t.Fatalf("persisted coverage = (%d, %d), want (%d, %d)",
+			persistedTip, persistedStart, tip, start)
+	}
+}
+
+func TestRunRescanJobFailsClosedOnUnavailableData(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*fakeRescanSource, *chainhash.Hash, *gcs.Filter)
+		wantError string
+	}{
+		{
+			name: "block hash read error",
+			configure: func(source *fakeRescanSource, _ *chainhash.Hash, _ *gcs.Filter) {
+				source.getBlockHash = func(int64) (*chainhash.Hash, error) {
+					return nil, errors.New("hash read failed")
+				}
+			},
+			wantError: "block hash unavailable",
+		},
+		{
+			name: "nil block hash",
+			configure: func(source *fakeRescanSource, _ *chainhash.Hash, _ *gcs.Filter) {
+				source.getBlockHash = func(int64) (*chainhash.Hash, error) {
+					return nil, nil
+				}
+			},
+			wantError: "block hash unavailable",
+		},
+		{
+			name: "filter read error",
+			configure: func(source *fakeRescanSource, _ *chainhash.Hash, _ *gcs.Filter) {
+				source.getCFilter = func(chainhash.Hash) (*gcs.Filter, error) {
+					return nil, errors.New("filter read failed")
+				}
+			},
+			wantError: "compact filter unavailable",
+		},
+		{
+			name: "nil filter",
+			configure: func(source *fakeRescanSource, _ *chainhash.Hash, _ *gcs.Filter) {
+				source.getCFilter = func(chainhash.Hash) (*gcs.Filter, error) {
+					return nil, nil
+				}
+			},
+			wantError: "compact filter unavailable",
+		},
+		{
+			name: "matched block error",
+			configure: func(source *fakeRescanSource, _ *chainhash.Hash, _ *gcs.Filter) {
+				source.getBlock = func(chainhash.Hash) (*btcutil.Block, error) {
+					return nil, errors.New("block read failed")
+				}
+			},
+			wantError: "matched block unavailable",
+		},
+		{
+			name: "nil matched block",
+			configure: func(source *fakeRescanSource, _ *chainhash.Hash, _ *gcs.Filter) {
+				source.getBlock = func(chainhash.Hash) (*btcutil.Block, error) {
+					return nil, nil
+				}
+			},
+			wantError: "matched block unavailable",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mgr, store, addr := newRescanTestManager(t)
+			blockHash := newRescanTestHash(t)
+			filter := newRescanMatchingFilter(t, blockHash, addr)
+			source := newRescanTestSource(blockHash, filter, newRescanTestBlock())
+			test.configure(source, blockHash, filter)
+
+			err := mgr.runRescanJobWithSource(&rescanJob{
+				startHeight:    0,
+				addrs:          []address.Address{addr},
+				updateCoverage: true,
+				force:          true,
+			}, source)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("runRescanJobWithSource() error = %v, want containing %q", err, test.wantError)
+			}
+
+			assertRescanCoverage(t, mgr, store, 5, 1)
+			status := mgr.GetRescanStatus()
+			if !strings.Contains(status.LastError, test.wantError) {
+				t.Fatalf("LastError = %q, want containing %q", status.LastError, test.wantError)
+			}
+			if _, exists := mgr.utxoSet["known:0"]; !exists {
+				t.Fatal("failed scan mutated the UTXO set")
+			}
+		})
+	}
+}
+
+func TestRunRescanJobKeepsMempoolOnSpendVerificationFailure(t *testing.T) {
+	mgr, store, addr := newRescanTestManager(t)
+	mgr.status.LastScannedTip = 1
+	if err := store.SaveRescanMeta(1, 1); err != nil {
+		t.Fatalf("SaveRescanMeta() error: %v", err)
+	}
+	initialTxID := strings.Repeat("02", chainhash.HashSize)
+	mgr.utxoSet = map[string]UTXO{
+		initialTxID + ":0": {
+			TxID: initialTxID, Vout: 0, Address: rescanTestAddress, Height: 0,
+		},
+	}
+	mgr.SetTxHistoryEnabled(true)
+
+	blockHash := newRescanTestHash(t)
+	filter := newRescanMatchingFilter(t, blockHash, addr)
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("PayToAddrScript() error: %v", err)
+	}
+	pendingTx := wire.NewMsgTx(2)
+	pendingTx.AddTxOut(wire.NewTxOut(1234, script))
+	pendingTxID := pendingTx.TxHash().String()
+
+	tracker := &MempoolTracker{
+		logger:  newTrackerLogger(),
+		entries: map[string]*mempoolEntry{pendingTxID: {txid: pendingTxID}},
+		utxos:   make(map[string]MempoolUTXO),
+		spends:  make(map[string]MempoolSpend),
+	}
+	mgr.SetMempoolTracker(tracker)
+
+	blockCalls := 0
+	source := newRescanTestSource(blockHash, filter, nil)
+	source.endHeight = 1
+	source.getBlock = func(chainhash.Hash) (*btcutil.Block, error) {
+		blockCalls++
+		if blockCalls == 1 {
+			return newRescanTestBlock(pendingTx), nil
+		}
+		return nil, errors.New("spend verification block read failed")
+	}
+
+	err = mgr.runRescanJobWithSource(&rescanJob{
+		startHeight:    1,
+		addrs:          []address.Address{addr},
+		updateCoverage: true,
+		force:          true,
+	}, source)
+	if err == nil || !strings.Contains(err.Error(), "spend verification block unavailable") {
+		t.Fatalf("runRescanJobWithSource() error = %v, want spend verification block error", err)
+	}
+
+	assertRescanCoverage(t, mgr, store, 1, 1)
+	if _, exists := mgr.utxoSet[initialTxID+":0"]; !exists {
+		t.Fatal("failed verification removed an existing UTXO")
+	}
+	if _, exists := tracker.entries[pendingTxID]; !exists {
+		t.Fatal("failed scan evicted a pending mempool entry")
+	}
+	history, err := store.LoadTxHistorySince(0)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince() error: %v", err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("failed scan persisted transaction history: %+v", history)
+	}
+}
+
+func TestRunRescanJobCommitsCompleteScan(t *testing.T) {
+	mgr, store, addr := newRescanTestManager(t)
+	mgr.utxoSet = make(map[string]UTXO)
+	mgr.SetTxHistoryEnabled(true)
+
+	blockHash := newRescanTestHash(t)
+	filter := newRescanMatchingFilter(t, blockHash, addr)
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("PayToAddrScript() error: %v", err)
+	}
+	confirmedTx := wire.NewMsgTx(2)
+	confirmedTx.AddTxOut(wire.NewTxOut(1234, script))
+	confirmedTxID := confirmedTx.TxHash().String()
+
+	tracker := &MempoolTracker{
+		logger:  newTrackerLogger(),
+		entries: map[string]*mempoolEntry{confirmedTxID: {txid: confirmedTxID}},
+		utxos:   make(map[string]MempoolUTXO),
+		spends:  make(map[string]MempoolSpend),
+	}
+	mgr.SetMempoolTracker(tracker)
+
+	source := newRescanTestSource(blockHash, filter, newRescanTestBlock(confirmedTx))
+	err = mgr.runRescanJobWithSource(&rescanJob{
+		startHeight:    6,
+		addrs:          []address.Address{addr},
+		updateCoverage: true,
+	}, source)
+	if err != nil {
+		t.Fatalf("runRescanJobWithSource() error: %v", err)
+	}
+
+	assertRescanCoverage(t, mgr, store, 6, 1)
+	if status := mgr.GetRescanStatus(); status.LastError != "" {
+		t.Fatalf("LastError = %q, want empty after successful scan", status.LastError)
+	}
+	if _, exists := mgr.utxoSet[confirmedTxID+":0"]; !exists {
+		t.Fatal("successful scan did not add watched UTXO")
+	}
+	utxo := mgr.utxoSet[confirmedTxID+":0"]
+	if utxo.VerifiedTipHeight != 6 || utxo.VerifiedTipHash != blockHash.String() {
+		t.Fatalf("new UTXO provenance = (%d, %s), want (6, %s)",
+			utxo.VerifiedTipHeight, utxo.VerifiedTipHash, blockHash)
+	}
+	history, err := store.LoadTxHistorySince(0)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince() error: %v", err)
+	}
+	if len(history) != 1 || history[0].TxID != confirmedTxID {
+		t.Fatalf("unexpected persisted transaction history: %+v", history)
+	}
+	if _, exists := tracker.entries[confirmedTxID]; exists {
+		t.Fatal("successful scan did not evict confirmed mempool entry")
+	}
+}
+
+func TestRunRescanJobCommitsNonmatchingScan(t *testing.T) {
+	mgr, store, addr := newRescanTestManager(t)
+	blockHash := newRescanTestHash(t)
+	source := newRescanTestSource(
+		blockHash,
+		newRescanTestFilter(t, blockHash, [][]byte{[]byte("unrelated script")}),
+		nil,
+	)
+
+	err := mgr.runRescanJobWithSource(&rescanJob{
+		startHeight:    6,
+		addrs:          []address.Address{addr},
+		updateCoverage: true,
+	}, source)
+	if err != nil {
+		t.Fatalf("runRescanJobWithSource() error: %v", err)
+	}
+
+	assertRescanCoverage(t, mgr, store, 6, 1)
+	if status := mgr.GetRescanStatus(); status.LastError != "" {
+		t.Fatalf("LastError = %q, want empty after successful scan", status.LastError)
+	}
+	if _, exists := mgr.utxoSet["known:0"]; !exists {
+		t.Fatal("nonmatching scan changed existing UTXO")
+	}
+}
+
+func TestRunRescanJobDoesNotCertifyUnanchoredUTXOFromSuffix(t *testing.T) {
+	mgr, _, addr := newRescanTestManager(t)
+	txid := strings.Repeat("02", chainhash.HashSize)
+	mgr.utxoSet = map[string]UTXO{
+		txid + ":0": {
+			TxID: txid, Vout: 0, Address: rescanTestAddress, Height: 1,
+		},
+	}
+
+	blockHash := newRescanTestHash(t)
+	source := newRescanTestSource(
+		blockHash,
+		newRescanTestFilter(t, blockHash, [][]byte{[]byte("unrelated script")}),
+		nil,
+	)
+	err := mgr.runRescanJobWithSource(&rescanJob{
+		startHeight: 6,
+		addrs:       []address.Address{addr},
+		force:       true,
+	}, source)
+	if err != nil {
+		t.Fatalf("runRescanJobWithSource() error: %v", err)
+	}
+
+	utxo := mgr.utxoSet[txid+":0"]
+	if utxo.VerifiedTipHeight != 0 || utxo.VerifiedTipHash != "" {
+		t.Fatalf("suffix scan certified unanchored UTXO: %+v", utxo)
+	}
+}
+
+func TestRunRescanJobAdvancesAnchoredUTXOOnlyWithContinuity(t *testing.T) {
+	oldTipHash := chainhash.Hash{1}
+	newTipHash := chainhash.Hash{2}
+	gapTipHash := chainhash.Hash{3}
+	reorgedOldTipHash := chainhash.Hash{4}
+	txid := strings.Repeat("03", chainhash.HashSize)
+
+	newSource := func(endHeight int32, hashes map[int64]*chainhash.Hash) *fakeRescanSource {
+		filters := make(map[chainhash.Hash]*gcs.Filter, len(hashes))
+		for _, blockHash := range hashes {
+			filters[*blockHash] = newRescanTestFilter(t, blockHash, [][]byte{[]byte("unrelated script")})
+		}
+		return &fakeRescanSource{
+			endHeight: endHeight,
+			getBlockHash: func(height int64) (*chainhash.Hash, error) {
+				blockHash, ok := hashes[height]
+				if !ok {
+					return nil, fmt.Errorf("unexpected header height %d", height)
+				}
+				return blockHash, nil
+			},
+			getCFilter: func(blockHash chainhash.Hash) (*gcs.Filter, error) {
+				filter, ok := filters[blockHash]
+				if !ok {
+					return nil, fmt.Errorf("unexpected filter hash %s", blockHash)
+				}
+				return filter, nil
+			},
+			getBlock: func(chainhash.Hash) (*btcutil.Block, error) {
+				return nil, errors.New("unexpected block request")
+			},
+		}
+	}
+
+	t.Run("contiguous extension", func(t *testing.T) {
+		mgr, _, addr := newRescanTestManager(t)
+		mgr.utxoSet = map[string]UTXO{
+			txid + ":0": {
+				TxID: txid, Vout: 0, Address: rescanTestAddress, Height: 1,
+				VerifiedTipHeight: 5, VerifiedTipHash: oldTipHash.String(),
+			},
+		}
+		err := mgr.runRescanJobWithSource(&rescanJob{
+			startHeight: 6,
+			addrs:       []address.Address{addr},
+			force:       true,
+		}, newSource(6, map[int64]*chainhash.Hash{5: &oldTipHash, 6: &newTipHash}))
+		if err != nil {
+			t.Fatalf("runRescanJobWithSource() error: %v", err)
+		}
+		utxo := mgr.utxoSet[txid+":0"]
+		if utxo.VerifiedTipHeight != 6 || utxo.VerifiedTipHash != newTipHash.String() {
+			t.Fatalf("contiguous scan did not advance provenance: %+v", utxo)
+		}
+	})
+
+	t.Run("gap preserves old anchor", func(t *testing.T) {
+		mgr, _, addr := newRescanTestManager(t)
+		mgr.utxoSet = map[string]UTXO{
+			txid + ":0": {
+				TxID: txid, Vout: 0, Address: rescanTestAddress, Height: 1,
+				VerifiedTipHeight: 5, VerifiedTipHash: oldTipHash.String(),
+			},
+		}
+		err := mgr.runRescanJobWithSource(&rescanJob{
+			startHeight: 7,
+			addrs:       []address.Address{addr},
+			force:       true,
+		}, newSource(7, map[int64]*chainhash.Hash{7: &gapTipHash}))
+		if err != nil {
+			t.Fatalf("runRescanJobWithSource() error: %v", err)
+		}
+		utxo := mgr.utxoSet[txid+":0"]
+		if utxo.VerifiedTipHeight != 5 || utxo.VerifiedTipHash != oldTipHash.String() {
+			t.Fatalf("gapped scan changed old provenance: %+v", utxo)
+		}
+	})
+
+	t.Run("reorged old anchor remains untrusted", func(t *testing.T) {
+		mgr, _, addr := newRescanTestManager(t)
+		mgr.utxoSet = map[string]UTXO{
+			txid + ":0": {
+				TxID: txid, Vout: 0, Address: rescanTestAddress, Height: 1,
+				VerifiedTipHeight: 5, VerifiedTipHash: oldTipHash.String(),
+			},
+		}
+		err := mgr.runRescanJobWithSource(&rescanJob{
+			startHeight: 6,
+			addrs:       []address.Address{addr},
+			force:       true,
+		}, newSource(6, map[int64]*chainhash.Hash{5: &reorgedOldTipHash, 6: &newTipHash}))
+		if err != nil {
+			t.Fatalf("runRescanJobWithSource() error: %v", err)
+		}
+		utxo := mgr.utxoSet[txid+":0"]
+		if utxo.VerifiedTipHeight != 5 || utxo.VerifiedTipHash != oldTipHash.String() {
+			t.Fatalf("reorged anchor was advanced: %+v", utxo)
+		}
+	})
+}
+
+func TestRunRescanJobRejectsReorgedScanWithoutCommit(t *testing.T) {
+	mgr, store, addr := newRescanTestManager(t)
+	mgr.utxoSet = make(map[string]UTXO)
+	mgr.SetTxHistoryEnabled(true)
+
+	oldHash := chainhash.Hash{1}
+	newHash := chainhash.Hash{2}
+	filter := newRescanMatchingFilter(t, &oldHash, addr)
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("PayToAddrScript() error: %v", err)
+	}
+	confirmedTx := wire.NewMsgTx(2)
+	confirmedTx.AddTxOut(wire.NewTxOut(1234, script))
+	confirmedTxID := confirmedTx.TxHash().String()
+	tracker := &MempoolTracker{
+		logger:  newTrackerLogger(),
+		entries: map[string]*mempoolEntry{confirmedTxID: {txid: confirmedTxID}},
+		utxos:   make(map[string]MempoolUTXO),
+		spends:  make(map[string]MempoolSpend),
+	}
+	mgr.SetMempoolTracker(tracker)
+
+	headerReads := 0
+	source := &fakeRescanSource{
+		endHeight: 6,
+		getBlockHash: func(height int64) (*chainhash.Hash, error) {
+			if height != 6 {
+				return nil, fmt.Errorf("unexpected header height %d", height)
+			}
+			headerReads++
+			if headerReads <= 2 {
+				return &oldHash, nil
+			}
+			return &newHash, nil
+		},
+		getCFilter: func(blockHash chainhash.Hash) (*gcs.Filter, error) {
+			if !blockHash.IsEqual(&oldHash) {
+				return nil, fmt.Errorf("filter requested for unexpected hash %s", blockHash)
+			}
+			return filter, nil
+		},
+		getBlock: func(blockHash chainhash.Hash) (*btcutil.Block, error) {
+			if !blockHash.IsEqual(&oldHash) {
+				return nil, fmt.Errorf("block requested for unexpected hash %s", blockHash)
+			}
+			return newRescanTestBlock(confirmedTx), nil
+		},
+	}
+
+	err = mgr.runRescanJobWithSource(&rescanJob{
+		startHeight:    6,
+		addrs:          []address.Address{addr},
+		updateCoverage: true,
+		force:          true,
+	}, source)
+	if err == nil || !strings.Contains(err.Error(), "chain changed during scan") {
+		t.Fatalf("runRescanJobWithSource() error = %v, want chain change", err)
+	}
+	assertRescanCoverage(t, mgr, store, 5, 1)
+	if _, exists := mgr.utxoSet[confirmedTxID+":0"]; exists {
+		t.Fatal("reorged scan committed a UTXO")
+	}
+	if _, exists := tracker.entries[confirmedTxID]; !exists {
+		t.Fatal("reorged scan evicted a mempool entry")
+	}
+	history, err := store.LoadTxHistorySince(0)
+	if err != nil {
+		t.Fatalf("LoadTxHistorySince() error: %v", err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("reorged scan committed transaction history: %+v", history)
 	}
 }

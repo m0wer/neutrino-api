@@ -5,6 +5,7 @@ package neutrino
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,11 +17,11 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
-	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btclog"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/blockntfns"
@@ -718,18 +719,6 @@ func (r *RescanManager) beginRescan(startHeight int32, addresses []string, force
 
 	r.statusMu.Lock()
 	r.status.LastStarted = time.Now().Unix()
-	// Preserve the *earliest* start height ever scanned so clients can
-	// correctly determine coverage. Auto-sync passes always start at
-	// (lastTip+1) which is far ahead of the original lookback start;
-	// overwriting LastStartHeight with that value would erase the wallet's
-	// historical coverage record and force a full re-scan on next CLI
-	// invocation. Only widen coverage (lower the recorded start) -- never
-	// narrow it.
-	if job.updateCoverage &&
-		(r.status.LastStartHeight == 0 || startHeight < r.status.LastStartHeight) {
-		r.status.LastStartHeight = startHeight
-	}
-	r.status.LastError = ""
 	r.statusMu.Unlock()
 
 	r.logger.Infof(
@@ -750,6 +739,15 @@ func (r *RescanManager) releaseRescanSlot() {
 
 // runRescanJob executes an admitted rescan and releases the rescan slot.
 func (r *RescanManager) runRescanJob(job *rescanJob) error {
+	return r.runRescanJobWithSource(job, chainServiceUTXOScanSource{
+		chainService: r.chainService,
+	})
+}
+
+// runRescanJobWithSource executes an admitted rescan against a narrow chain
+// data source. Keeping the source injectable makes scan-completeness failures
+// testable without a live chain service.
+func (r *RescanManager) runRescanJobWithSource(job *rescanJob, source utxoScanSource) error {
 	defer r.releaseRescanSlot()
 
 	// Determine effective start height: skip already-scanned ranges when possible.
@@ -768,22 +766,29 @@ func (r *RescanManager) runRescanJob(job *rescanJob) error {
 	}
 
 	// Get current best block.
-	bestBlock, err := r.chainService.BestBlock()
+	bestHeight, err := source.BestBlock()
 	if err != nil {
 		err = fmt.Errorf("failed to get best block: %w", err)
 		r.recordRescanFailure(err)
 		return err
 	}
+	if bestHeight < persistedTip {
+		err = fmt.Errorf("chain tip changed during scan: current height %d is below prior coverage %d",
+			bestHeight, persistedTip)
+		r.recordRescanFailure(err)
+		return err
+	}
 
 	// If effective start is already past the tip, nothing to scan.
-	if effectiveStart > bestBlock.Height {
+	if effectiveStart > bestHeight {
 		r.logger.Infof("Incremental rescan: already up-to-date (effective_start=%d, chain_tip=%d)",
-			effectiveStart, bestBlock.Height)
+			effectiveStart, bestHeight)
 		r.statusMu.Lock()
 		r.status.LastFinished = time.Now().Unix()
 		if job.updateCoverage {
-			r.status.LastScannedTip = bestBlock.Height
+			r.status.LastScannedTip = bestHeight
 		}
+		r.status.LastError = ""
 		r.statusMu.Unlock()
 		r.persistState()
 		// No blocks were scanned, so nothing in the watched mempool
@@ -791,15 +796,43 @@ func (r *RescanManager) runRescanJob(job *rescanJob) error {
 		return nil
 	}
 
-	// Scan blocks from effectiveStart to bestBlock.Height
-	confirmedTxids, err := r.scanBlocks(effectiveStart, bestBlock.Height, job.addrs)
+	targetHash, err := source.GetBlockHash(int64(bestHeight))
+	if err != nil {
+		err = rescanDataUnavailable("target block hash", bestHeight, err)
+		r.recordRescanFailure(err)
+		return err
+	}
+	if targetHash == nil {
+		err = rescanDataUnavailable("target block hash", bestHeight, nil)
+		r.recordRescanFailure(err)
+		return err
+	}
+	scanSource := newConsistentScanSource(source, bestHeight, *targetHash)
+
+	// scanBlocks does not mutate state, so incomplete scans cannot
+	// be committed as coverage.
+	result, err := r.scanBlocks(effectiveStart, bestHeight, job.addrs, scanSource)
+	if err == nil {
+		err = scanSource.validate(context.Background())
+	}
+	if err == nil {
+		result.verifiedTipHeight = bestHeight
+		result.verifiedTipHash = targetHash.String()
+		r.commitScanResult(result)
+	}
+
 	r.statusMu.Lock()
 	r.status.LastFinished = time.Now().Unix()
-	if job.updateCoverage {
-		r.status.LastScannedTip = bestBlock.Height
-	}
 	if err != nil {
 		r.status.LastError = err.Error()
+	} else {
+		if job.updateCoverage {
+			r.status.LastScannedTip = bestHeight
+			if r.status.LastStartHeight == 0 || job.startHeight < r.status.LastStartHeight {
+				r.status.LastStartHeight = job.startHeight
+			}
+		}
+		r.status.LastError = ""
 	}
 	r.statusMu.Unlock()
 
@@ -811,8 +844,8 @@ func (r *RescanManager) runRescanJob(job *rescanJob) error {
 	// that still-unconfirmed tracked txs survive: mempool peers do not
 	// reliably re-announce txs we have already acked, so a wholesale wipe
 	// would silently drop tracked entries until they confirm.
-	if err == nil && len(confirmedTxids) > 0 {
-		r.notifyMempoolConfirmed(confirmedTxids)
+	if err == nil && len(result.confirmedTxids) > 0 {
+		r.notifyMempoolConfirmed(result.confirmedTxids)
 	}
 
 	return err
@@ -872,27 +905,146 @@ func (r *RescanManager) persistState() {
 	}
 }
 
-// scanBlocks scans blocks in the given range for transactions matching the addresses.
+// scanResult contains all discoveries made during a completed scan. It is
+// committed only after every required chain read, including spend verification,
+// has succeeded.
+type scanResult struct {
+	confirmedTxids     []string
+	foundUTXOs         map[string]UTXO
+	spentOutputs       map[string]struct{}
+	verifiedSpent      map[string]struct{}
+	anchorAdvancements map[string]UTXO
+	txHistory          map[string]*TxHistoryRecord
+	verifiedTipHeight  int32
+	verifiedTipHash    string
+}
+
+// consistentScanSource records every header used by a scan and verifies that
+// each remains canonical before the scan result is committed.
+type consistentScanSource struct {
+	source       utxoScanSource
+	targetHeight int32
+	targetHash   chainhash.Hash
+
+	mu       sync.Mutex
+	observed map[int32]chainhash.Hash
+}
+
+func newConsistentScanSource(
+	source utxoScanSource, targetHeight int32, targetHash chainhash.Hash,
+) *consistentScanSource {
+	return &consistentScanSource{
+		source:       source,
+		targetHeight: targetHeight,
+		targetHash:   targetHash,
+		observed:     map[int32]chainhash.Hash{targetHeight: targetHash},
+	}
+}
+
+func (s *consistentScanSource) BestBlock() (int32, error) {
+	return s.source.BestBlock()
+}
+
+func (s *consistentScanSource) GetBlockHash(height int64) (*chainhash.Hash, error) {
+	blockHash, err := s.source.GetBlockHash(height)
+	if err != nil || blockHash == nil {
+		return blockHash, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	observedHash, ok := s.observed[int32(height)]
+	if ok && !blockHash.IsEqual(&observedHash) {
+		return nil, fmt.Errorf("chain changed during scan at height %d", height)
+	}
+	s.observed[int32(height)] = *blockHash
+	return blockHash, nil
+}
+
+func (s *consistentScanSource) GetCFilter(blockHash chainhash.Hash) (*gcs.Filter, error) {
+	return s.source.GetCFilter(blockHash)
+}
+
+func (s *consistentScanSource) GetBlock(blockHash chainhash.Hash) (*btcutil.Block, error) {
+	return s.source.GetBlock(blockHash)
+}
+
+func (s *consistentScanSource) validate(ctx context.Context) error {
+	s.mu.Lock()
+	observed := make(map[int32]chainhash.Hash, len(s.observed))
+	for height, blockHash := range s.observed {
+		if height != s.targetHeight {
+			observed[height] = blockHash
+		}
+	}
+	s.mu.Unlock()
+
+	for height, blockHash := range observed {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		canonicalHash, err := s.source.GetBlockHash(int64(height))
+		if err != nil {
+			return rescanDataUnavailable("block hash validation", height, err)
+		}
+		if canonicalHash == nil {
+			return rescanDataUnavailable("block hash validation", height, nil)
+		}
+		if !canonicalHash.IsEqual(&blockHash) {
+			return fmt.Errorf("chain changed during scan at height %d", height)
+		}
+	}
+
+	// Check the target last: a tip-only reorg during ancestor validation must
+	// not leave the scan certified against a target checked before that reorg.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	currentTip, err := s.source.BestBlock()
+	if err != nil {
+		return rescanDataUnavailable("chain tip validation", s.targetHeight, err)
+	}
+	if currentTip < s.targetHeight {
+		return fmt.Errorf("chain tip changed during scan: current height %d is below target %d",
+			currentTip, s.targetHeight)
+	}
+	canonicalTarget, err := s.source.GetBlockHash(int64(s.targetHeight))
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil || canonicalTarget == nil {
+		return rescanDataUnavailable("target block hash validation", s.targetHeight, err)
+	}
+	if !canonicalTarget.IsEqual(&s.targetHash) {
+		return fmt.Errorf("chain changed during scan at target height %d", s.targetHeight)
+	}
+	return nil
+}
+
+func rescanDataUnavailable(resource string, height int32, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s unavailable at height %d: %w", resource, height, err)
+	}
+	return fmt.Errorf("%s unavailable at height %d", resource, height)
+}
+
 // scanBlocks scans the [startHeight, endHeight] range for transactions
-// touching any of the supplied addresses. It returns the set of txids
-// observed in matched blocks so callers can evict matching mempool entries.
-// Note that the returned slice is over-eager: it includes every txid in any
-// matched block, not only the ones that paid/spent a watched script. This
-// is safe because consumers (MempoolTracker.EvictConfirmed) only act on
-// txids they already track and silently ignore the rest.
-func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address.Address) ([]string, error) {
+// touching any of the supplied addresses. It returns staged discoveries that
+// must be committed only after the complete scan succeeds.
+func (r *RescanManager) scanBlocks(
+	startHeight, endHeight int32, addrs []address.Address, source utxoScanSource,
+) (*scanResult, error) {
 	totalBlocks := endHeight - startHeight + 1
 	r.logger.Infof("Scanning blocks %d to %d (%d blocks) for %d addresses",
 		startHeight, endHeight, totalBlocks, len(addrs))
 
-	// Build script filters for matching
+	// Build script filters for matching.
 	scripts := make([][]byte, 0, len(addrs))
 	addrToScript := make(map[string]string) // scriptHex -> address
 	for _, addr := range addrs {
 		script, err := txscript.PayToAddrScript(addr)
 		if err != nil {
-			r.logger.Warnf("Failed to create script for address %s: %v", addr.String(), err)
-			continue
+			return nil, fmt.Errorf("failed to create script for address %s: %w", addr.String(), err)
 		}
 		scripts = append(scripts, script)
 		addrToScript[hex.EncodeToString(script)] = addr.String()
@@ -902,29 +1054,23 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address
 		return nil, errors.New("no valid scripts to scan for")
 	}
 
-	// Track spent outputs to remove from UTXO set
-	spentOutputs := make(map[string]bool)
-	// confirmedTxids collects every txid in any matched block, surfaced
-	// to callers so a mempool tracker can evict precisely the entries
-	// that just confirmed (instead of wiping its whole view).
-	confirmedTxids := make([]string, 0)
-	foundUTXOs := make(map[string]UTXO)
-
-	// Progress tracking
+	// Progress tracking.
 	scanStart := time.Now()
 	lastProgressLog := scanStart
 	blocksScanned := int32(0)
 	filterMatches := 0
 	const progressInterval = 10 * time.Second
 
-	// Parallel phase 1: scan compact filters only.
-	// This is the bottleneck and can safely run concurrently.
+	// Parallel phase 1: scan compact filters only. The collector drains every
+	// worker result after an error, so the bounded worker pool always exits.
 	workerCount := computeFilterWorkerCount(runtime.GOMAXPROCS(0))
 	r.logger.Infof("Filter scan worker pool: %d workers", workerCount)
 
 	type filterResult struct {
-		height  int32
-		matched bool
+		height    int32
+		matched   bool
+		blockHash chainhash.Hash
+		err       error
 	}
 
 	heightJobs := make(chan int32, workerCount*4)
@@ -936,34 +1082,34 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address
 		go func() {
 			defer wg.Done()
 			for height := range heightJobs {
-				blockHash, err := r.chainService.GetBlockHash(int64(height))
+				blockHash, err := source.GetBlockHash(int64(height))
 				if err != nil {
-					r.logger.Debugf("Failed to get block hash for height %d: %v", height, err)
-					results <- filterResult{height: height, matched: false}
+					results <- filterResult{height: height, err: rescanDataUnavailable("block hash", height, err)}
+					continue
+				}
+				if blockHash == nil {
+					results <- filterResult{height: height, err: rescanDataUnavailable("block hash", height, nil)}
 					continue
 				}
 
-				filter, err := r.chainService.GetCFilter(*blockHash, wire.GCSFilterRegular)
+				filter, err := source.GetCFilter(*blockHash)
 				if err != nil {
-					r.logger.Debugf("Failed to get filter for block %d: %v", height, err)
-					results <- filterResult{height: height, matched: false}
+					results <- filterResult{height: height, err: rescanDataUnavailable("compact filter", height, err)}
 					continue
 				}
-
 				if filter == nil {
-					results <- filterResult{height: height, matched: false}
+					results <- filterResult{height: height, err: rescanDataUnavailable("compact filter", height, nil)}
 					continue
 				}
 
 				key := builder.DeriveKey(blockHash)
 				matched, err := filter.MatchAny(key, scripts)
 				if err != nil {
-					r.logger.Debugf("Filter match error for block %d: %v", height, err)
-					results <- filterResult{height: height, matched: false}
+					results <- filterResult{height: height, err: rescanDataUnavailable("compact filter match", height, err)}
 					continue
 				}
 
-				results <- filterResult{height: height, matched: matched}
+				results <- filterResult{height: height, matched: matched, blockHash: *blockHash}
 			}
 		}()
 	}
@@ -978,11 +1124,17 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address
 	}()
 
 	matchedHeights := make([]int32, 0, 16)
+	matchedBlockHashes := make(map[int32]chainhash.Hash)
+	var scanErr error
 	for res := range results {
 		blocksScanned++
+		if res.err != nil && scanErr == nil {
+			scanErr = res.err
+		}
 		if res.matched {
 			filterMatches++
 			matchedHeights = append(matchedHeights, res.height)
+			matchedBlockHashes[res.height] = res.blockHash
 		}
 
 		now := time.Now()
@@ -999,49 +1151,57 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address
 			lastProgressLog = now
 		}
 	}
+	if scanErr != nil {
+		return nil, scanErr
+	}
 
-	// Snapshot the pre-scan watched outpoints and the tx-history toggle so
-	// the block loop can label a transaction as spending one of our coins
-	// without holding the lock during network I/O.
+	// Snapshot watched outpoints and construct a local UTXO view. This view is
+	// used for phase 3 and is not committed unless all subsequent reads succeed.
 	r.mu.RLock()
 	historyEnabled := r.txHistoryEnabled && r.store != nil
+	utxoSnapshot := make(map[string]UTXO, len(r.utxoSet))
+	priorUTXOs := make(map[string]UTXO, len(r.utxoSet))
 	watchedOutpoints := make(map[string]struct{}, len(r.utxoSet))
-	if historyEnabled {
-		for key := range r.utxoSet {
+	for key, utxo := range r.utxoSet {
+		priorUTXOs[key] = utxo
+		utxoSnapshot[key] = utxo
+		if historyEnabled {
 			watchedOutpoints[key] = struct{}{}
 		}
 	}
 	r.mu.RUnlock()
 
-	// txHistory accumulates confirmed watched-tx records for this scan; keyed
-	// by txid so receive+spend on the same tx merge into one record.
-	txHistory := make(map[string]*TxHistoryRecord)
+	result := &scanResult{
+		confirmedTxids:     make([]string, 0),
+		foundUTXOs:         make(map[string]UTXO),
+		spentOutputs:       make(map[string]struct{}),
+		anchorAdvancements: make(map[string]UTXO),
+		txHistory:          make(map[string]*TxHistoryRecord),
+	}
 
 	// Phase 2: fetch full blocks only for matched heights.
 	slices.Sort(matchedHeights)
 	for _, height := range matchedHeights {
-		blockHash, err := r.chainService.GetBlockHash(int64(height))
-		if err != nil {
-			r.logger.Debugf("Failed to get block hash for matched block %d: %v", height, err)
-			continue
-		}
+		blockHash := matchedBlockHashes[height]
 
 		r.logger.Debugf("Block %d filter matched, fetching full block", height)
-		block, err := r.chainService.GetBlock(*blockHash)
+		block, err := source.GetBlock(blockHash)
 		if err != nil {
-			r.logger.Warnf("Failed to get block %d: %v", height, err)
-			continue
+			return nil, rescanDataUnavailable("matched block", height, err)
+		}
+		if block == nil {
+			return nil, rescanDataUnavailable("matched block", height, nil)
 		}
 
 		for _, tx := range block.Transactions() {
 			txHash := tx.Hash().String()
-			confirmedTxids = append(confirmedTxids, txHash)
+			result.confirmedTxids = append(result.confirmedTxids, txHash)
 
 			spendsWatched := false
 			for _, txIn := range tx.MsgTx().TxIn {
 				prevOut := txIn.PreviousOutPoint
 				key := fmt.Sprintf("%s:%d", prevOut.Hash.String(), prevOut.Index)
-				spentOutputs[key] = true
+				result.spentOutputs[key] = struct{}{}
 				if historyEnabled {
 					if _, ok := watchedOutpoints[key]; ok {
 						spendsWatched = true
@@ -1054,7 +1214,7 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address
 				scriptHex := hex.EncodeToString(txOut.PkScript)
 				if addrStr, ok := addrToScript[scriptHex]; ok {
 					utxoKey := fmt.Sprintf("%s:%d", txHash, vout)
-					utxo := UTXO{
+					result.foundUTXOs[utxoKey] = UTXO{
 						TxID:         txHash,
 						Vout:         uint32(vout),
 						Value:        txOut.Value,
@@ -1062,7 +1222,6 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address
 						ScriptPubKey: scriptHex,
 						Height:       height,
 					}
-					foundUTXOs[utxoKey] = utxo
 					receiveAddrs = append(receiveAddrs, addrStr)
 					r.logger.Infof("Found UTXO: %s:%d value=%d address=%s height=%d",
 						txHash, vout, txOut.Value, addrStr, height)
@@ -1070,15 +1229,50 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address
 			}
 
 			if historyEnabled && (len(receiveAddrs) > 0 || spendsWatched) {
-				r.recordTxHistory(txHistory, tx, txHash, height, receiveAddrs, spendsWatched)
+				r.recordTxHistory(result.txHistory, tx, txHash, height, receiveAddrs, spendsWatched)
 			}
 		}
 	}
 
-	// Persist the confirmed watched-tx records for this scan.
-	if historyEnabled && len(txHistory) > 0 {
-		recs := make([]TxHistoryRecord, 0, len(txHistory))
-		for _, rec := range txHistory {
+	// Apply the phase-2 discoveries to the local view before verifying spends.
+	for utxoKey, utxo := range result.foundUTXOs {
+		if _, spent := result.spentOutputs[utxoKey]; !spent {
+			utxoSnapshot[utxoKey] = utxo
+		}
+	}
+	for utxoKey := range result.spentOutputs {
+		delete(utxoSnapshot, utxoKey)
+	}
+
+	// Phase 3: use a per-script scan to catch spends the batch MatchAny pass
+	// can miss. Any unavailable data invalidates the whole scan result.
+	verifiedSpent, err := r.verifyUTXOsUnspentWithSource(utxoSnapshot, startHeight, endHeight, source)
+	if err != nil {
+		return nil, err
+	}
+	result.verifiedSpent = verifiedSpent
+	result.anchorAdvancements = r.anchorAdvancementCandidates(
+		priorUTXOs, startHeight, endHeight, source,
+	)
+
+	elapsed := time.Since(scanStart)
+	blocksPerSec := float64(0)
+	if elapsed.Seconds() > 0 {
+		blocksPerSec = float64(blocksScanned) / elapsed.Seconds()
+	}
+	r.logger.Infof("Scan complete: %d blocks in %s (%.1f blocks/sec) | %d filter matches | %d UTXOs found | %d verified spends",
+		blocksScanned, elapsed.Round(time.Millisecond), blocksPerSec, filterMatches,
+		len(result.foundUTXOs), len(result.verifiedSpent))
+
+	return result, nil
+}
+
+// commitScanResult applies a complete scan result to the live and persisted
+// views. Callers must not invoke it for a scan that returned an error.
+func (r *RescanManager) commitScanResult(result *scanResult) {
+	if len(result.txHistory) > 0 && r.store != nil {
+		recs := make([]TxHistoryRecord, 0, len(result.txHistory))
+		for _, rec := range result.txHistory {
 			recs = append(recs, *rec)
 		}
 		if err := r.store.SaveTxHistoryBatch(recs); err != nil {
@@ -1086,56 +1280,69 @@ func (r *RescanManager) scanBlocks(startHeight, endHeight int32, addrs []address
 		}
 	}
 
-	elapsed := time.Since(scanStart)
-
-	// Update UTXO set (preliminary — before spend verification).
 	r.mu.Lock()
-
-	// Add new UTXOs (if not spent in this scan batch).
 	added := 0
-	for utxoKey, utxo := range foundUTXOs {
-		if !spentOutputs[utxoKey] {
+	for utxoKey, utxo := range result.foundUTXOs {
+		if _, spent := result.spentOutputs[utxoKey]; !spent {
+			utxo.VerifiedTipHeight = result.verifiedTipHeight
+			utxo.VerifiedTipHash = result.verifiedTipHash
 			r.utxoSet[utxoKey] = utxo
 			added++
 		}
 	}
 
-	// Remove spent UTXOs detected by the batch filter scan.
 	removed := 0
-	for utxoKey := range spentOutputs {
+	for utxoKey := range result.spentOutputs {
 		if _, existed := r.utxoSet[utxoKey]; existed {
 			delete(r.utxoSet, utxoKey)
 			removed++
 		}
 	}
-
-	// Snapshot the current UTXO set for the spend verification pass.
-	// We need to release the lock before doing network I/O.
-	utxoSnapshot := make(map[string]UTXO, len(r.utxoSet))
-	for k, v := range r.utxoSet {
-		utxoSnapshot[k] = v
+	for utxoKey := range result.verifiedSpent {
+		if _, existed := r.utxoSet[utxoKey]; existed {
+			delete(r.utxoSet, utxoKey)
+			removed++
+		}
 	}
+	for utxoKey, priorUTXO := range result.anchorAdvancements {
+		currentUTXO, exists := r.utxoSet[utxoKey]
+		if !exists || currentUTXO != priorUTXO {
+			continue
+		}
+		currentUTXO.VerifiedTipHeight = result.verifiedTipHeight
+		currentUTXO.VerifiedTipHash = result.verifiedTipHash
+		r.utxoSet[utxoKey] = currentUTXO
+	}
+	total := len(r.utxoSet)
 	r.mu.Unlock()
 
-	blocksPerSec := float64(0)
-	if elapsed.Seconds() > 0 {
-		blocksPerSec = float64(blocksScanned) / elapsed.Seconds()
-	}
-	r.logger.Infof("Scan complete: %d blocks in %s (%.1f blocks/sec) | %d filter matches | %d UTXOs found, %d added, %d spent removed | total UTXO set: %d",
-		blocksScanned, elapsed.Round(time.Millisecond), blocksPerSec,
-		filterMatches, len(foundUTXOs), added, removed, len(r.utxoSet))
+	r.logger.Infof("Committed scan result: %d UTXOs added, %d spent removed, %d total",
+		added, removed, total)
+}
 
-	// Phase 3: Spend verification pass.
-	// The batch MatchAny filter scan can miss spends in certain cases (e.g.
-	// subtle differences in multi-script vs single-script filter matching).
-	// Verify each UTXO individually using per-script filter.Match, the same
-	// approach used by GetUTXO which is known to be reliable.
-	verifiedSpent := r.verifyUTXOsUnspent(utxoSnapshot, startHeight, endHeight)
-	if verifiedSpent > 0 {
-		r.logger.Infof("Spend verification removed %d additional spent UTXOs", verifiedSpent)
+// anchorAdvancementCandidates returns previously verified UTXOs whose proven
+// range is contiguous with this scan. Missing or invalid old provenance is not
+// upgraded by a suffix scan.
+func (r *RescanManager) anchorAdvancementCandidates(
+	utxos map[string]UTXO, scanStart, scanEnd int32, source utxoScanSource,
+) map[string]UTXO {
+	candidates := make(map[string]UTXO)
+	for utxoKey, utxo := range utxos {
+		if utxo.VerifiedTipHeight < utxo.Height || utxo.VerifiedTipHeight >= scanEnd ||
+			scanStart > utxo.VerifiedTipHeight+1 || len(utxo.VerifiedTipHash) != chainhash.MaxHashStringSize {
+			continue
+		}
+		verifiedTipHash, err := chainhash.NewHashFromStr(utxo.VerifiedTipHash)
+		if err != nil {
+			continue
+		}
+		canonicalHash, err := source.GetBlockHash(int64(utxo.VerifiedTipHeight))
+		if err != nil || canonicalHash == nil || !canonicalHash.IsEqual(verifiedTipHash) {
+			continue
+		}
+		candidates[utxoKey] = utxo
 	}
-
-	return confirmedTxids, nil
+	return candidates
 }
 
 // recordTxHistory merges a confirmed watched transaction into the per-scan
@@ -1188,25 +1395,54 @@ func (r *RescanManager) recordTxHistory(
 	}
 }
 
-// verifyUTXOsUnspent performs a per-UTXO spend check for all UTXOs in the
-// snapshot. For each UTXO, it scans block filters from the UTXO's creation
-// height to endHeight using single-script filter.Match (not MatchAny). Any
-// block that matches is downloaded and checked for transactions spending the
-// UTXO. Confirmed spends are removed from r.utxoSet.
-//
-// This is a defense-in-depth measure: the main batch scan (MatchAny) should
-// catch most spends, but this pass ensures none are missed.
+// verifyUTXOsUnspent performs a per-UTXO spend check and removes the proven
+// spends. Scan jobs use verifyUTXOsUnspentWithSource so failures can abort
+// before mutating the live UTXO set.
 func (r *RescanManager) verifyUTXOsUnspent(
 	snapshot map[string]UTXO, scanStart, scanEnd int32,
 ) int {
 	if len(snapshot) == 0 {
 		return 0
 	}
+	if r.chainService == nil {
+		r.logger.Warn("Spend verification skipped: chain service is nil")
+		return 0
+	}
+
+	spent, err := r.verifyUTXOsUnspentWithSource(snapshot, scanStart, scanEnd, chainServiceUTXOScanSource{
+		chainService: r.chainService,
+	})
+	if err != nil {
+		r.logger.Warnf("Spend verification failed: %v", err)
+		return 0
+	}
+
+	removed := 0
+	r.mu.Lock()
+	for utxoKey := range spent {
+		if _, exists := r.utxoSet[utxoKey]; exists {
+			delete(r.utxoSet, utxoKey)
+			removed++
+		}
+	}
+	r.mu.Unlock()
+	return removed
+}
+
+// verifyUTXOsUnspentWithSource performs the spend verification pass without
+// mutating state. Every chain read is required to prove the resulting view is
+// complete, so unavailable data returns an error instead of being skipped.
+func (r *RescanManager) verifyUTXOsUnspentWithSource(
+	snapshot map[string]UTXO, scanStart, scanEnd int32, source utxoScanSource,
+) (map[string]struct{}, error) {
+	spentUTXOs := make(map[string]struct{})
+	if len(snapshot) == 0 {
+		return spentUTXOs, nil
+	}
 
 	r.logger.Infof("Spend verification: checking %d UTXOs for spends in range %d..%d",
 		len(snapshot), scanStart, scanEnd)
 	verifyStart := time.Now()
-	removed := 0
 
 	for utxoKey, utxo := range snapshot {
 		// Only verify UTXOs that could have been spent in the scanned range.
@@ -1220,82 +1456,77 @@ func (r *RescanManager) verifyUTXOsUnspent(
 			continue
 		}
 
-		// Build the pkScript for this UTXO's address.
 		addr, err := address.DecodeAddress(utxo.Address, r.chainParams)
 		if err != nil {
-			r.logger.Debugf("Spend verify: skip %s, bad address %s: %v",
-				utxoKey, utxo.Address, err)
-			continue
+			return nil, fmt.Errorf("spend verification address for UTXO %s: %w", utxoKey, err)
 		}
 		pkScript, err := txscript.PayToAddrScript(addr)
 		if err != nil {
-			r.logger.Debugf("Spend verify: skip %s, script error: %v",
-				utxoKey, err)
-			continue
+			return nil, fmt.Errorf("spend verification script for UTXO %s: %w", utxoKey, err)
 		}
 
-		// Parse the UTXO txid for outpoint comparison.
 		targetHash, err := chainhash.NewHashFromStr(utxo.TxID)
 		if err != nil {
-			r.logger.Debugf("Spend verify: skip %s, bad txid: %v",
-				utxoKey, err)
-			continue
+			return nil, fmt.Errorf("spend verification txid for UTXO %s: %w", utxoKey, err)
 		}
 
-		spent := false
-		for height := checkFrom; height <= scanEnd && !spent; height++ {
-			blockHash, err := r.chainService.GetBlockHash(int64(height))
+		for height := checkFrom; height <= scanEnd; height++ {
+			blockHash, err := source.GetBlockHash(int64(height))
 			if err != nil {
-				continue
+				return nil, rescanDataUnavailable("spend verification block hash", height, err)
+			}
+			if blockHash == nil {
+				return nil, rescanDataUnavailable("spend verification block hash", height, nil)
 			}
 
-			filter, err := r.chainService.GetCFilter(*blockHash, wire.GCSFilterRegular)
-			if err != nil || filter == nil {
-				continue
+			filter, err := source.GetCFilter(*blockHash)
+			if err != nil {
+				return nil, rescanDataUnavailable("spend verification compact filter", height, err)
+			}
+			if filter == nil {
+				return nil, rescanDataUnavailable("spend verification compact filter", height, nil)
 			}
 
 			key := builder.DeriveKey(blockHash)
 			matched, err := filter.Match(key, pkScript)
-			if err != nil || !matched {
+			if err != nil {
+				return nil, rescanDataUnavailable("spend verification compact filter match", height, err)
+			}
+			if !matched {
 				continue
 			}
 
-			// Filter matched for this single script — fetch full block.
-			block, err := r.chainService.GetBlock(*blockHash)
+			block, err := source.GetBlock(*blockHash)
 			if err != nil {
-				r.logger.Debugf("Spend verify: failed to get block %d: %v", height, err)
-				continue
+				return nil, rescanDataUnavailable("spend verification block", height, err)
+			}
+			if block == nil {
+				return nil, rescanDataUnavailable("spend verification block", height, nil)
 			}
 
 			for _, tx := range block.Transactions() {
 				for _, txIn := range tx.MsgTx().TxIn {
 					prevOut := txIn.PreviousOutPoint
 					if prevOut.Hash.IsEqual(targetHash) && prevOut.Index == utxo.Vout {
-						spent = true
+						spentUTXOs[utxoKey] = struct{}{}
 						r.logger.Infof("Spend verify: %s spent at height %d in tx %s",
 							utxoKey, height, tx.Hash().String())
 						break
 					}
 				}
-				if spent {
+				if _, spent := spentUTXOs[utxoKey]; spent {
 					break
 				}
 			}
-		}
-
-		if spent {
-			r.mu.Lock()
-			if _, exists := r.utxoSet[utxoKey]; exists {
-				delete(r.utxoSet, utxoKey)
-				removed++
+			if _, spent := spentUTXOs[utxoKey]; spent {
+				break
 			}
-			r.mu.Unlock()
 		}
 	}
 
-	r.logger.Infof("Spend verification complete: checked %d UTXOs in %s, removed %d spent",
-		len(snapshot), time.Since(verifyStart).Round(time.Millisecond), removed)
-	return removed
+	r.logger.Infof("Spend verification complete: checked %d UTXOs in %s, found %d spent",
+		len(snapshot), time.Since(verifyStart).Round(time.Millisecond), len(spentUTXOs))
+	return spentUTXOs, nil
 }
 
 // AddUTXO adds a UTXO to the set (for use by notification handlers).
