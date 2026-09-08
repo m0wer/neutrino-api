@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-08
+
+### Changed
+
+- Update the build and CI toolchain to Go 1.27.1 and the QEMU setup action
+  to v4.3.0 after reviewing release dependency pins.
+- Refresh compatible Go dependencies, including `golang.org/x/crypto` v0.56.0
+  and `golang.org/x/exp` at `e88cd73687aa`.
+
 ### Fixed
 
 - Fail watched-address scans when required chain data is unavailable instead of

@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-GO_VERSION="1.27.0"
+GO_VERSION="1.27.1"
 GO_IMAGE="golang:${GO_VERSION}-bookworm"
 
 usage() {

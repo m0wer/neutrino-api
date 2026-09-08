@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Update these reviewed pins together, then run this script before each release.
-GO_VERSION="1.27.0"
+GO_VERSION="1.27.1"
 ALPINE_VERSION="3.23.5"
 NEUTRINO_VERSION="v0.18.0"
 NEUTRINO_FORK_VERSION="v0.0.0-20260823192754-eae1fa650415"
@@ -99,7 +99,7 @@ rules: list[tuple[str, str, str, int]] = [
     (".github/workflows/release.yaml", r"actions/setup-go@v[0-9.]+", "actions/setup-go@v7.0.0", 1),
     (".github/workflows/release.yaml", r"actions/upload-artifact@v[0-9.]+", "actions/upload-artifact@v7.0.1", 1),
     (".github/workflows/release.yaml", r"actions/download-artifact@v[0-9.]+", "actions/download-artifact@v8.0.1", 1),
-    (".github/workflows/release.yaml", r"docker/setup-qemu-action@v[0-9.]+", "docker/setup-qemu-action@v4.2.0", 1),
+    (".github/workflows/release.yaml", r"docker/setup-qemu-action@v[0-9.]+", "docker/setup-qemu-action@v4.3.0", 1),
     (".github/workflows/release.yaml", r"docker/setup-buildx-action@v[0-9.]+", "docker/setup-buildx-action@v4.3.0", 1),
     (".github/workflows/release.yaml", r"docker/login-action@v[0-9.]+", "docker/login-action@v4.6.0", 1),
     (".github/workflows/release.yaml", r"docker/metadata-action@v[0-9.]+", "docker/metadata-action@v6.2.0", 1),
