@@ -454,12 +454,21 @@ only the on-chain status. A confirmed spend always takes precedence over
 any tracked mempool spend.
 
 **Important Notes**:
-- The `address` parameter is **required**. Compact block filters (BIP158) work by matching on scripts, not transaction IDs. Without the address, filter matching cannot work correctly.
+- The `address` parameter is **required** and must match the requested output's script, not another output from the same transaction. A discovered mismatch returns `400 Bad Request`. Compact block filters (BIP158) work by matching on scripts, not transaction IDs.
 - Specifying a `start_height` parameter is **highly recommended** for performance. Set it to the block height where the UTXO was created (or slightly before). Without it, the scan could take a very long time as it scans from the provided height to the current chain tip.
 - The `start_height` means "start scanning FROM this height going FORWARD to the chain tip", not backwards.
 - Performance scales with the scan range: scanning 1 block takes ~0.01s, scanning 100 blocks takes ~0.5s, scanning 10,000+ blocks can take minutes.
-- A single-UTXO lookup has a 25-second server deadline. It returns `503 Service Unavailable` when a required block hash, compact filter, or block cannot be retrieved, and `504 Gateway Timeout` when that lookup deadline expires. Both responses are retryable; an `unspent` response is returned only after every block through the captured chain tip has been checked.
-- UTXOs for watched wallet addresses return immediately from the persisted rescan state when its coverage reaches the current chain tip. Stale cached state is never used to answer an `unspent` query.
+- A single-UTXO lookup has a 25-second server deadline. It returns `503 Service Unavailable` when required chain data is unavailable or a chain change invalidates the scan, and `504 Gateway Timeout` when that lookup deadline expires. Both responses are retryable. Positive and negative scan results are checked against a consistent snapshot; an `unspent` response requires checking every block through that snapshot's tip.
+- Watched UTXOs use the persisted fast path only when the output's `verified_tip_height` and `verified_tip_hash` match the current canonical tip. Height-only coverage is not verification evidence. Otherwise the requested outpoint is scanned from `start_height`.
+
+Existing installations retain their UTXOs and coverage on upgrade. Missing,
+partial, or older provenance is not backfilled as verified and does not trigger
+an automatic historical rescan. Such outputs can take longer to verify on demand.
+Newly discovered outputs gain provenance after a complete scan; an existing
+anchor advances only when the scan covers a contiguous extension on that chain.
+The UTXO-list and transaction-history endpoints remain cached discovery views,
+not authoritative reorg-safe payment or spend verification. Use the single-UTXO
+endpoint for a specific outpoint before relying on its unspent status.
 
 ### Get Transaction (mempool only)
 
@@ -571,6 +580,13 @@ endpoint's `last_error` field. A forced scan over an explicit address subset
 does not modify the persisted `last_start_height`/`last_scanned_tip`
 coverage metadata, because only that subset was evaluated over the range.
 
+Missing block hashes, filters, or matched blocks fail the scan. Failed scans
+leave previously recorded coverage, UTXOs, transaction history, and pending
+mempool entries unchanged; inspect `last_error` before relying on completion.
+Chain changes that invalidate a scan also fail without committing its results.
+Stored UTXOs gain optional verification fields, without a database reset or
+automatic upgrade rescan.
+
 ### Peers
 
 Get connected peer information:
@@ -590,6 +606,18 @@ Response:
 ## Development
 
 ### Running Tests
+
+Run the offline-reorg regression from the repository root with Docker available:
+
+```bash
+python3 scripts/test-utxo-reorg.py
+```
+
+It builds the current daemon in an isolated regtest Compose project, creates a
+throwaway wallet, and checks persisted-cache rejection after a restart and fork
+replacement. The replacement branch gains greater work before adoption; unit
+tests separately cover same-height hash changes. No ports are published, and
+the fixture removes its own containers and volumes on exit.
 
 ```bash
 cd neutrino_server

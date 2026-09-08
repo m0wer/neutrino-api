@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fail watched-address scans when required chain data is unavailable instead of
+  marking incomplete ranges as covered. Preserve previous coverage, UTXOs,
+  transaction history, and pending mempool entries when a scan fails.
+- Require per-output chain-tip provenance before using cached UTXOs for
+  verification, and reject scans invalidated by a reorg. Retain older caches
+  without certifying them from height alone or starting an upgrade rescan.
+- Reject single-UTXO lookups whose supplied address matches a different output,
+  preventing incorrect unspent reports from scanning with the wrong script.
+
 ### Added
 
 - Add `DELETE /v1/watch/addresses` for idempotent batch removal of watched
