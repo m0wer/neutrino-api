@@ -8,11 +8,15 @@ on:
     paths:
       - 'neutrino_server/**'
       - 'docker-compose.yml'
+      - 'docker-compose.reorg-test.yml'
+      - 'scripts/test-utxo-reorg.py'
       - '.github/workflows/test.yaml'
   pull_request:
     paths:
       - 'neutrino_server/**'
       - 'docker-compose.yml'
+      - 'docker-compose.reorg-test.yml'
+      - 'scripts/test-utxo-reorg.py'
       - '.github/workflows/test.yaml'
   workflow_dispatch:
   workflow_call:
@@ -129,6 +133,9 @@ jobs:
           PEERS=$(curl -s http://localhost:8334/v1/peers)
           echo "Peers response: $PEERS"
           echo "$PEERS" | jq -e '.count != null' || exit 1
+
+      - name: Test persisted UTXO cache across offline reorg
+        run: python3 scripts/test-utxo-reorg.py
 
       - name: Show logs on failure
         if: failure()

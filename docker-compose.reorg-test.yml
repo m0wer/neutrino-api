@@ -1,0 +1,62 @@
+services:
+  bitcoin:
+    image: kylemanna/bitcoind@sha256:86bbcaa99bf3bf3d5df7fd6d9217b3a41194db4c4e34385064f2cfc9fa7bdf91
+    restart: "no"
+    healthcheck:
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      test: ["CMD-SHELL", "bitcoin-cli -chain=regtest -rpcport=18443 -rpcuser=test -rpcpassword=test getblockchaininfo"]
+    command:
+      - '-server=1'
+      - '-regtest=1'
+      - '-rpcuser=test'
+      - '-rpcpassword=test'
+      - '-rpcallowip=0.0.0.0/0'
+      - '-rpcbind=0.0.0.0'
+      - '-rpcport=18443'
+      - '-port=18444'
+      - '-txindex=1'
+      - '-fallbackfee=0.0002'
+      - '-disablewallet=0'
+      - '-blockfilterindex=1'
+      - '-peerblockfilters=1'
+    volumes:
+      - bitcoin-data:/home/bitcoin/.bitcoin
+    networks:
+      - reorg-test
+
+  neutrino:
+    build:
+      context: ./neutrino_server
+      dockerfile: Dockerfile
+      args:
+        VERSION: reorg-test
+    restart: "no"
+    environment:
+      NETWORK: regtest
+      LISTEN_ADDR: 0.0.0.0:8334
+      DATA_DIR: /data/neutrino
+      LOG_LEVEL: info
+      ADD_PEERS: bitcoin:18444
+      NO_AUTH: "true"
+      AUTO_SYNC_WATCHED: "false"
+      PREFETCH_FILTERS: "false"
+      CLEARNET_INITIAL_SYNC: "false"
+      CFILTER_CDN_AUTO: "false"
+    volumes:
+      - neutrino-data:/data/neutrino
+    networks:
+      - reorg-test
+    depends_on:
+      bitcoin:
+        condition: service_healthy
+
+volumes:
+  bitcoin-data:
+  neutrino-data:
+
+networks:
+  reorg-test:
+    driver: bridge
+    internal: true
